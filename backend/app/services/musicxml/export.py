@@ -14,6 +14,8 @@ from music21 import harmony as m21harmony
 from music21 import clef as m21clef
 from music21 import layout as m21layout
 from music21 import articulations as m21articulations
+from music21 import interval as m21interval
+from music21 import pitch as m21pitch
 
 from app.schemas import ScoreData
 from app.services.chords.template import Segment
@@ -76,10 +78,23 @@ def _get_preferred_tab_position(midi_note: int) -> tuple[int, int]:
         # Fallback for very high/low notes not covered (unlikely for guitar range)
         return (0, 0)
 
-    # Prefer low frets (<= 5)
-    low_pos = [c for c in candidates if c[1] <= 5]
+    # Prioritize Open Position (Frets 0-4 usually, let's say 0-5)
+    # Strategy:
+    # 1. Look for open strings (fret 0)
+    # 2. Look for frets 1-5
+    # 3. Use lowest fret available otherwise.
+
+    # Check for 0 (Open strings)
+    zeros = [c for c in candidates if c[1] == 0]
+    if zeros:
+        return zeros[0] # Prefer lower string number? doesn't matter much for same note
+
+    # Check for frets 1-5
+    low_pos = [c for c in candidates if 1 <= c[1] <= 5]
     if low_pos:
-        # Pick the one with the lowest fret number
+        # If multiple, prefer the one on the lower string (higher string_num) -> thicker string?
+        # Or higher string (lower string_num) -> brighter tone?
+        # For beginners, maybe lower fret is king.
         return min(low_pos, key=lambda x: x[1])
 
     # Otherwise pick lowest fret available
@@ -105,7 +120,14 @@ def export_musicxml(
     # Part 1: Standard Notation + Chords
     part_notation = m21stream.Part()
     part_notation.id = "P1"
-    part_notation.insert(0, m21instrument.Guitar() if instrument == "guitar" else m21instrument.Piano())
+
+    # Instrument Setup
+    # Note: m21instrument.Guitar() implies transposition (sounding vs written).
+    # If we manually transpose notes, we should be careful.
+    # However, setting it to Guitar helps OSMD pick the right icon/sound.
+    inst_not = m21instrument.Guitar() if instrument == "guitar" else m21instrument.Piano()
+    part_notation.insert(0, inst_not)
+
     part_notation.insert(0, m21meter.TimeSignature(time_signature))
     if key_signature_fifths is not None:
         part_notation.insert(0, m21key.KeySignature(int(key_signature_fifths)))
@@ -119,24 +141,23 @@ def export_musicxml(
     staff_layout = m21layout.StaffLayout(staffLines=6)
     part_tab.insert(0, tab_clef)
     part_tab.insert(0, staff_layout)
+    inst_tab = m21instrument.Guitar()
+    part_tab.insert(0, inst_tab)
+
     part_tab.insert(0, m21meter.TimeSignature(time_signature))
     if key_signature_fifths is not None:
         part_tab.insert(0, m21key.KeySignature(int(key_signature_fifths)))
 
     # Calculate measure duration for chord mapping
-    # 4/4 time -> 4 beats per measure.
-    # Note: This is a simplification assuming 4/4.
-    # Real robustness requires parsing time_signature string.
     try:
         ts_num, ts_den = map(int, time_signature.split("/"))
     except:
         ts_num, ts_den = 4, 4
 
     seconds_per_beat = 60.0 / tempo_bpm
-    seconds_per_measure = seconds_per_beat * ts_num # e.g. 4 beats
-    quarter_length_per_measure = float(ts_num) * (4.0 / float(ts_den)) # e.g. 4 * (4/4) = 4.0
+    seconds_per_measure = seconds_per_beat * ts_num
+    quarter_length_per_measure = float(ts_num) * (4.0 / float(ts_den))
 
-    # Helper to find chords in a measure
     def get_chords_for_measure(measure_idx: int) -> List[tuple[float, str]]:
         if not chords:
             return []
@@ -146,14 +167,14 @@ def export_musicxml(
 
         found = []
         for c in chords:
-            # Check overlap or containment
-            # We treat chords as events at their start time mostly for placement
             if m_start_time <= c.start < m_end_time:
-                # Calculate offset in quarter lengths
                 rel_time = c.start - m_start_time
                 offset_q = (rel_time / seconds_per_measure) * quarter_length_per_measure
                 found.append((offset_q, c.label))
         return found
+
+    # Transposition interval for Guitar Notation (Sounding -> Written: Up 1 octave)
+    transpose_interval = m21interval.Interval('P8')
 
     for i, meas in enumerate(score_data.measures):
         # --- Standard Staff Measure ---
@@ -162,23 +183,19 @@ def export_musicxml(
         # Inject Chords
         measure_chords = get_chords_for_measure(i)
         for offset, label in measure_chords:
-            # Label format "C:maj", "A#:min"
             try:
                 if ":" in label:
                     root_str, kind_str = label.split(":")
-                    # Map kind to music21 compatibility if needed
-                    # basic types: maj, min, dim, aug, etc.
-                    # music21 understands many.
-                    if kind_str == "7": kind_str = "dominant" # "C:7" -> dominant
-
-                    # Create ChordSymbol
+                    if kind_str == "7": kind_str = "dominant"
                     h = m21harmony.ChordSymbol(root=root_str, kind=kind_str)
-                    # Insert at specific offset
-                    # Note: inserting directly into Measure at offset requires care with existing elements?
-                    # m21stream.Measure.insert(offset, obj) works.
                     m_not.insert(offset, h)
+                else:
+                    # Handle "N" or simple labels
+                    if label != "N":
+                        h = m21harmony.ChordSymbol(root=label)
+                        m_not.insert(offset, h)
             except Exception:
-                pass # Ignore invalid chord parsing
+                pass
 
         # --- Tab Staff Measure ---
         m_tab = m21stream.Measure(number=int(meas.number))
@@ -189,34 +206,39 @@ def export_musicxml(
                 tuplet = (int(item.tuplet.num_notes), int(item.tuplet.notes_occupied))
             ql = _quarter_length(item.duration, int(item.dots), tuplet)
 
-            # Create objects for both staves
             if item.rest or not item.keys:
                 obj_not = m21note.Rest(quarterLength=ql)
                 obj_tab = m21note.Rest(quarterLength=ql)
             else:
                 pitches_str = [_vf_key_to_m21_pitch(k) for k in item.keys]
 
-                # Standard Notation Object
-                if len(pitches_str) == 1:
-                    obj_not = m21note.Note(pitches_str[0], quarterLength=ql)
-                else:
-                    obj_not = m21chord.Chord(pitches_str, quarterLength=ql)
+                # --- Standard Notation Object ---
+                # We need to transpose pitches up by an octave for standard guitar notation
+                written_pitches = []
+                for p_str in pitches_str:
+                    p = m21pitch.Pitch(p_str)
+                    p.transpose(transpose_interval, inPlace=True)
+                    written_pitches.append(p)
 
-                # Tab Notation Object
-                # For Tab, we need separate notes to attach string/fret info effectively
-                # or a Chord with individual note heads having articulations.
-                if len(pitches_str) == 1:
-                    obj_tab = m21note.Note(pitches_str[0], quarterLength=ql)
-                    s, f = _get_preferred_tab_position(obj_tab.pitch.midi)
+                if len(written_pitches) == 1:
+                    obj_not = m21note.Note(written_pitches[0], quarterLength=ql)
+                else:
+                    obj_not = m21chord.Chord(written_pitches, quarterLength=ql)
+
+                # --- Tab Notation Object ---
+                # Use original (sounding) pitches to calculate fret positions
+                sounding_pitches = [m21pitch.Pitch(p_str) for p_str in pitches_str]
+
+                if len(sounding_pitches) == 1:
+                    p = sounding_pitches[0]
+                    obj_tab = m21note.Note(p, quarterLength=ql)
+                    s, f = _get_preferred_tab_position(p.midi)
                     if s > 0:
                         obj_tab.articulations.append(m21articulations.StringIndication(s))
                         obj_tab.articulations.append(m21articulations.FretIndication(f))
                 else:
-                    obj_tab = m21chord.Chord(pitches_str, quarterLength=ql)
-                    # For chords, we iterate notes and add articulations?
-                    # Music21 chord structure is complex for tab.
-                    # Often easier to represent as a chord, and music21 might serialize it
-                    # if we attach string/fret to the notes inside the chord.
+                    # Tab Chord
+                    obj_tab = m21chord.Chord(sounding_pitches, quarterLength=ql)
                     for cn in obj_tab.notes:
                         s, f = _get_preferred_tab_position(cn.pitch.midi)
                         if s > 0:
@@ -235,17 +257,18 @@ def export_musicxml(
     except Exception:
         pass
 
-    # Group the parts
     score.insert(0, part_notation)
     score.insert(0, part_tab)
 
     # Add StaffGroup to link them visually
+    # barlineSpan=True ensures barlines go through both staves
     staff_group = m21layout.StaffGroup(
         [part_notation, part_tab],
         name="Guitar",
         abbreviation="Gtr.",
         symbol="bracket"
     )
+    staff_group.barlineSpan = True
     score.insert(0, staff_group)
 
     score.write("musicxml", fp=str(out_path))
