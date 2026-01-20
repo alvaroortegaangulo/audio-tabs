@@ -17,7 +17,18 @@ export default function OSMDViewer({ musicXML }: { musicXML: string }) {
       const { OpenSheetMusicDisplay } = mod as any;
 
       ref.current.innerHTML = "";
-      const osmd = new OpenSheetMusicDisplay(ref.current, { drawingParameters: "default" });
+      // Configure OSMD for Guitar Lead Sheet
+      const osmd = new OpenSheetMusicDisplay(ref.current, {
+        drawingParameters: "compacttight", // or "default"
+        drawPartNames: false,
+        drawTitle: true,
+        drawSubtitle: true,
+        drawFingerings: true, // Crucial for Tab
+        autoResize: true,
+      });
+
+      // Additional options usually passed via Engines
+      // osmd.setOptions({ ... }) could be used if strictly typed but constructor opts work.
 
       try {
         await osmd.load(musicXML);
