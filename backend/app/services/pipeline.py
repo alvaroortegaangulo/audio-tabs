@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from app.core.config import settings
-from app.schemas import JobResult, KeySignature, ChordSegment
+from app.schemas import JobResult, KeySignature, ChordSegment, ScoreData
 from app.services.audio import ffmpeg_to_wav_mono_44k, load_wav, peak_normalize
 from app.services.chords.extract import extract_chords_template
 from app.services.grid.beats import estimate_beats_librosa
@@ -13,6 +13,10 @@ from app.services.midi.export import export_chords_midi
 from app.services.musicxml.lead_sheet import export_lead_sheet_musicxml
 from app.services.theory.key import estimate_key_from_chroma, spell_chord_label
 
+# Transcription & Export Imports
+from app.services.amt.basic_pitch import transcribe_basic_pitch
+from app.services.theory.quantize import quantize_note_events_to_score
+from app.services.musicxml.export import export_musicxml
 
 def _job_title(job_dir: Path, input_path: Path) -> str:
     meta_path = job_dir / "input" / "meta.json"
@@ -95,6 +99,18 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
 
     time_sig = "4/4"
 
+    # --- 1. Basic Pitch Transcription ---
+    try:
+        midi_data, note_events = transcribe_basic_pitch(
+            wav_path,
+            midi_tempo=float(tempo_bpm)
+        )
+    except Exception as e:
+        print(f"Error executing basic_pitch: {e}")
+        note_events = []
+        midi_data = None
+
+    # --- 2. Chord Detection ---
     chroma, _times, chords = extract_chords_template(
         y,
         sr,
@@ -117,9 +133,9 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         )
 
     use_flats = bool(key_sig.use_flats) if key_sig else False
-    spelled: list[ChordSegment] = []
+    spelled_chords: list[ChordSegment] = []
     for c in chords:
-        spelled.append(
+        spelled_chords.append(
             ChordSegment(
                 start=float(c.start),
                 end=float(c.end),
@@ -128,32 +144,45 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             )
         )
 
-    title = _job_title(job_dir, input_path)
+    # --- 3. Quantization to ScoreData ---
+    quant_res = quantize_note_events_to_score(
+        note_events,
+        tempo_bpm=float(tempo_bpm),
+        time_signature=time_sig
+    )
+    score_data = quant_res.score
 
+    title = _job_title(job_dir, input_path)
     musicxml_path = out / "result.musicxml"
-    export_lead_sheet_musicxml(
+
+    # --- 4. Export MusicXML (Full Lead Sheet with Tab) ---
+    export_musicxml(
         musicxml_path,
-        spelled,
+        score_data,
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
         key_signature_fifths=(key_sig.fifths if key_sig else None),
         title=title,
         instrument="guitar",
+        chords=[Segment(c.start, c.end, c.label, c.confidence) for c in spelled_chords]
     )
 
     midi_path = out / "transcription.mid"
     export_chords_midi(
         midi_path,
-        spelled,
+        spelled_chords,
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
         root_octave=3,
     )
 
-    # PDF (LilyPond) best-effort: no fallar el job si LilyPond no está disponible.
+    # PDF (LilyPond) generation - kept as fallback/supplement
+    # Ideally LilyPond service should also be updated to support full score,
+    # but for now we focus on MusicXML/OSMD as requested.
+    pdf_error = None
     try:
         ly = build_lilypond_score(
-            spelled,
+            spelled_chords,
             tempo_bpm=float(tempo_bpm),
             time_signature=time_sig,
             key_tonic=(key_sig.tonic if key_sig else None),
@@ -161,7 +190,6 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             title=title,
         )
         render_lilypond_pdf(ly, out, basename="score")
-        pdf_error = None
     except Exception as e:
         pdf_error = f"No se pudo generar PDF (LilyPond): {e}"
 
@@ -170,8 +198,8 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
         key_signature=key_sig,
-        chords=spelled,
-        transcription_backend="chords_template_viterbi",
+        chords=spelled_chords,
+        transcription_backend="basic_pitch+chords_viterbi",
         transcription_error=pdf_error,
-        score=None,
+        score=score_data,
     )

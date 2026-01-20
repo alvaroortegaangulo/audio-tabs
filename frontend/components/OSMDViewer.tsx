@@ -25,6 +25,8 @@ export default function OSMDViewer({ musicXML }: { musicXML: string }) {
         drawSubtitle: true,
         drawFingerings: true, // Crucial for Tab
         autoResize: true,
+        // Ensure that we show both staves if they are in the XML
+        // OSMD usually auto-detects multiple staves.
       });
 
       // Additional options usually passed via Engines
