@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE score-partwise  PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
+<score-partwise version="4.0">
+  <movement-title>Music21 Fragment</movement-title>
+  <identification>
+    <creator type="composer">Music21</creator>
+    <encoding>
+      <encoding-date>2026-01-20</encoding-date>
+      <software>music21 v.9.3.0</software>
+    </encoding>
+  </identification>
+  <defaults>
+    <scaling>
+      <millimeters>7</millimeters>
+      <tenths>40</tenths>
+    </scaling>
+  </defaults>
+  <part-list>
+    <score-part id="P89a973dcca2fcd2d1ec695dcd2c3aee6">
+      <part-name>Guitar</part-name>
+      <part-abbreviation>Gtr</part-abbreviation>
+      <score-instrument id="I7f096a908315b88d533b2a14b4787df4">
+        <instrument-name>Guitar</instrument-name>
+        <instrument-abbreviation>Gtr</instrument-abbreviation>
+      </score-instrument>
+      <midi-instrument id="I7f096a908315b88d533b2a14b4787df4">
+        <midi-channel>1</midi-channel>
+        <midi-program>25</midi-program>
+      </midi-instrument>
+    </score-part>
+  </part-list>
+  <!--=========================== Part 1 ===========================-->
+  <part id="P89a973dcca2fcd2d1ec695dcd2c3aee6">
+    <!--========================= Measure 1 ==========================-->
+    <measure implicit="no" number="1">
+      <attributes>
+        <divisions>10080</divisions>
+        <time>
+          <beats>4</beats>
+          <beat-type>4</beat-type>
+        </time>
+      </attributes>
+      <harmony>
+        <root>
+          <root-step>G</root-step>
+          <root-alter>1</root-alter>
+        </root>
+        <kind>dominant</kind>
+      </harmony>
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+      <harmony>
+        <root>
+          <root-step>G</root-step>
+          <root-alter>0</root-alter>
+        </root>
+        <kind>major</kind>
+        <offset sound="yes">-32419</offset>
+      </harmony>
+    </measure>
+    <!--========================= Measure 2 ==========================-->
+    <measure implicit="no" number="2">
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+      <harmony>
+        <root>
+          <root-step>D</root-step>
+        </root>
+        <kind>major</kind>
+        <offset sound="yes">-26970</offset>
+      </harmony>
+    </measure>
+    <!--========================= Measure 3 ==========================-->
+    <measure implicit="no" number="3">
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+      <harmony>
+        <root>
+          <root-step>A</root-step>
+        </root>
+        <kind>minor</kind>
+        <offset sound="yes">-24791</offset>
+      </harmony>
+    </measure>
+    <!--========================= Measure 4 ==========================-->
+    <measure implicit="no" number="4">
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+      <harmony>
+        <root>
+          <root-step>A</root-step>
+        </root>
+        <kind>dominant</kind>
+        <offset sound="yes">-28877</offset>
+      </harmony>
+    </measure>
+    <!--========================= Measure 5 ==========================-->
+    <measure implicit="no" number="5">
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+      <harmony>
+        <root>
+          <root-step>G</root-step>
+        </root>
+        <kind>major</kind>
+        <offset sound="yes">-34054</offset>
+      </harmony>
+    </measure>
+    <!--========================= Measure 6 ==========================-->
+    <measure implicit="no" number="6">
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+      <harmony>
+        <root>
+          <root-step>D</root-step>
+        </root>
+        <kind>major</kind>
+        <offset sound="yes">-26698</offset>
+      </harmony>
+    </measure>
+    <!--========================= Measure 7 ==========================-->
+    <measure implicit="no" number="7">
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+      <harmony>
+        <root>
+          <root-step>C</root-step>
+        </root>
+        <kind>major</kind>
+        <offset sound="yes">-25063</offset>
+      </harmony>
+    </measure>
+    <!--========================= Measure 8 ==========================-->
+    <measure implicit="no" number="8">
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+    </measure>
+    <!--========================= Measure 9 ==========================-->
+    <measure implicit="no" number="9">
+      <note>
+        <rest measure="yes" />
+        <duration>40320</duration>
+      </note>
+      <harmony>
+        <root>
+          <root-step>G</root-step>
+        </root>
+        <kind>major</kind>
+        <offset sound="yes">-34598</offset>
+      </harmony>
+    </measure>
+  </part>
+</score-partwise>

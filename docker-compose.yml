@@ -1,0 +1,40 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+
+  backend:
+    build: ./backend
+    env_file: ./backend/.env.example
+    environment:
+      - CELERY_ENABLED=1
+      - REDIS_URL=redis://redis:6379/0
+      - DATA_DIR=/data
+      - FRONTEND_ORIGIN=http://localhost:3000
+    volumes:
+      - ./data:/data
+    ports: ["8000:8000"]
+    depends_on: [redis]
+
+  worker:
+    build: ./backend
+    env_file: ./backend/.env.example
+    environment:
+      - CELERY_ENABLED=1
+      - REDIS_URL=redis://redis:6379/0
+      - DATA_DIR=/data
+    volumes:
+      - ./data:/data
+    command: ["celery", "-A", "app.workers.celery_app:celery", "worker", "-l", "INFO", "-Q", "gpu"]
+    depends_on: [redis]
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
+    env_file: ./frontend/.env.example
+    environment:
+      - NEXT_PUBLIC_BACKEND_URL=http://localhost:8000
+    ports: ["3000:3000"]
+    depends_on: [backend]
