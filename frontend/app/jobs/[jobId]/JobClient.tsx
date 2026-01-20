@@ -1,9 +1,8 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getJob, getResult } from "@/lib/api";
-import LeadSheet from "@/components/LeadSheet";
-import ScoreViewer from "@/components/ScoreViewer";
+import { useEffect, useRef, useState } from "react";
+import { getJob, getMusicXML } from "@/lib/api";
+import OSMDViewer from "@/components/OSMDViewer";
 
 type JobClientProps = {
   jobId: string;
@@ -12,27 +11,68 @@ type JobClientProps = {
 export default function JobClient({ jobId }: JobClientProps) {
   const [status, setStatus] = useState<string>("queued");
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<any>(null);
+  const [xmlContent, setXmlContent] = useState<string | null>(null);
+  const [xmlLoading, setXmlLoading] = useState(false);
+  const xmlContentRef = useRef<string | null>(null);
+  const xmlLoadingRef = useRef(false);
+
+  useEffect(() => {
+    xmlContentRef.current = xmlContent;
+  }, [xmlContent]);
+
+  useEffect(() => {
+    xmlLoadingRef.current = xmlLoading;
+  }, [xmlLoading]);
 
   useEffect(() => {
     if (!jobId) return;
 
+    setStatus("queued");
+    setError(null);
+    setXmlContent(null);
+    setXmlLoading(false);
+    xmlContentRef.current = null;
+    xmlLoadingRef.current = false;
+
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
 
     async function poll() {
       try {
         const j = await getJob(jobId);
+        if (cancelled) return;
         setStatus(j.status);
         setError(j.error ?? null);
 
         if (j.status === "done") {
-          const res = await getResult(jobId);
-          setResult(res);
+          if (!xmlContentRef.current && !xmlLoadingRef.current) {
+            setXmlLoading(true);
+            try {
+              const xmlText = await getMusicXML(jobId);
+              if (!cancelled) {
+                setXmlContent(xmlText);
+              }
+            } catch (e: any) {
+              if (!cancelled) {
+                setError(e?.message ?? String(e));
+              }
+            } finally {
+              if (!cancelled) {
+                setXmlLoading(false);
+              }
+            }
+          }
+          if (!xmlContentRef.current) {
+            timer = setTimeout(poll, 1000);
+          }
           return;
         }
         if (j.status === "error") return;
       } catch (e: any) {
-        setError(e?.message ?? String(e));
+        if (!cancelled) {
+          setError(e?.message ?? String(e));
+          setXmlLoading(false);
+        }
       }
 
       timer = setTimeout(poll, 1000);
@@ -40,6 +80,7 @@ export default function JobClient({ jobId }: JobClientProps) {
 
     poll();
     return () => {
+      cancelled = true;
       if (timer) {
         clearTimeout(timer);
       }
@@ -57,14 +98,11 @@ export default function JobClient({ jobId }: JobClientProps) {
         {error && <p style={{ color: "crimson" }}>{error}</p>}
       </div>
 
-      {status === "done" && jobId && result && (
-        <>
-          {Array.isArray(result?.chords) ? (
-            <LeadSheet jobId={jobId} result={result} />
-          ) : (
-            <ScoreViewer jobId={jobId} result={result} />
-          )}
-        </>
+      {status === "done" && jobId && xmlContent && <OSMDViewer musicXML={xmlContent} />}
+      {status === "done" && jobId && !xmlContent && (
+        <div className="card">
+          <p>{xmlLoading ? "Cargando partitura..." : "Partitura no disponible aun."}</p>
+        </div>
       )}
     </>
   );

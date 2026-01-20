@@ -17,20 +17,16 @@ export default function OSMDViewer({ musicXML }: { musicXML: string }) {
       const { OpenSheetMusicDisplay } = mod as any;
 
       ref.current.innerHTML = "";
-      // Configure OSMD for Guitar Lead Sheet
       const osmd = new OpenSheetMusicDisplay(ref.current, {
-        drawingParameters: "compacttight", // or "default"
-        drawPartNames: false,
+        drawingParameters: "default",
+        drawPartNames: true,
+        drawPartAbbreviations: true,
         drawTitle: true,
         drawSubtitle: true,
-        drawFingerings: true, // Crucial for Tab
+        drawFingerings: true,
         autoResize: true,
-        // Ensure that we show both staves if they are in the XML
-        // OSMD usually auto-detects multiple staves.
+        renderSingleHorizontalStaffline: false,
       });
-
-      // Additional options usually passed via Engines
-      // osmd.setOptions({ ... }) could be used if strictly typed but constructor opts work.
 
       try {
         await osmd.load(musicXML);
@@ -48,7 +44,7 @@ export default function OSMDViewer({ musicXML }: { musicXML: string }) {
     <div className="card">
       <h2>Partitura (MusicXML)</h2>
       {err && <p style={{ color: "crimson" }}>{err}</p>}
-      <div ref={ref} />
+      <div ref={ref} style={{ width: "100%" }} />
     </div>
   );
 }
