@@ -1,14 +1,29 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from app.core.config import settings
-from app.schemas import JobResult
-from app.services.amt.basic_pitch import save_note_events_csv, transcribe_basic_pitch
+from app.schemas import JobResult, KeySignature, ChordSegment
 from app.services.audio import ffmpeg_to_wav_mono_44k, load_wav, peak_normalize
+from app.services.chords.extract import extract_chords_template
 from app.services.grid.beats import estimate_beats_librosa
-from app.services.musicxml.export import export_musicxml
-from app.services.theory.quantize import quantize_note_events_to_score
+from app.services.engraving.lilypond import build_lilypond_score, render_lilypond_pdf
+from app.services.midi.export import export_chords_midi
+from app.services.musicxml.lead_sheet import export_lead_sheet_musicxml
+from app.services.theory.key import estimate_key_from_chroma, spell_chord_label
+
+
+def _job_title(job_dir: Path, input_path: Path) -> str:
+    meta_path = job_dir / "input" / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        filename = str(meta.get("filename") or "").strip()
+        if filename:
+            return Path(filename).stem or filename
+    except Exception:
+        pass
+    return input_path.stem or "Lead Sheet"
 
 
 def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
@@ -26,44 +41,95 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     tempo_bpm, _beat_times = estimate_beats_librosa(y, sr)
     if not tempo_bpm or tempo_bpm <= 0:
         tempo_bpm = 120.0
+    # Librosa a veces devuelve double-time; normaliza a un rango más musical.
+    while tempo_bpm >= 200.0:
+        tempo_bpm /= 2.0
+    if tempo_bpm > 130.0:
+        half = tempo_bpm / 2.0
+        if 55.0 <= half <= 110.0:
+            tempo_bpm = half
+    while tempo_bpm < 50.0:
+        tempo_bpm *= 2.0
 
-    if not settings.ENABLE_BASIC_PITCH:
-        raise RuntimeError("ENABLE_BASIC_PITCH=0: Basic Pitch es obligatorio en este pipeline.")
+    time_sig = "4/4"
 
-    midi_data, note_events = transcribe_basic_pitch(
-        wav_path,
-        midi_tempo=float(tempo_bpm),
-        onset_threshold=float(settings.BASIC_PITCH_ONSET_THRESHOLD),
-        frame_threshold=float(settings.BASIC_PITCH_FRAME_THRESHOLD),
-        minimum_note_length_ms=float(settings.BASIC_PITCH_MIN_NOTE_MS),
-        melodia_trick=True,
+    chroma, _times, chords = extract_chords_template(
+        y,
+        sr,
+        vocab=str(settings.CHORD_VOCAB),
+        switch_penalty=float(settings.SWITCH_PENALTY),
+        min_segment_sec=float(settings.MIN_SEGMENT_SEC),
+    )
+
+    key_est = estimate_key_from_chroma(chroma)
+    key_sig = None
+    if key_est is not None:
+        key_sig = KeySignature(
+            tonic=key_est.tonic,
+            mode=key_est.mode,
+            fifths=int(key_est.fifths),
+            name=key_est.name,
+            vexflow=key_est.vexflow,
+            use_flats=bool(key_est.use_flats),
+            score=float(key_est.score),
+        )
+
+    use_flats = bool(key_sig.use_flats) if key_sig else False
+    spelled: list[ChordSegment] = []
+    for c in chords:
+        spelled.append(
+            ChordSegment(
+                start=float(c.start),
+                end=float(c.end),
+                label=spell_chord_label(str(c.label), use_flats=use_flats),
+                confidence=float(c.confidence),
+            )
+        )
+
+    title = _job_title(job_dir, input_path)
+
+    musicxml_path = out / "result.musicxml"
+    export_lead_sheet_musicxml(
+        musicxml_path,
+        spelled,
+        tempo_bpm=float(tempo_bpm),
+        time_signature=time_sig,
+        key_signature_fifths=(key_sig.fifths if key_sig else None),
+        title=title,
+        instrument="guitar",
     )
 
     midi_path = out / "transcription.mid"
-    midi_data.write(str(midi_path))
-    save_note_events_csv(note_events, out / "note_events.csv")
-
-    time_sig = "4/4"
-    quant = quantize_note_events_to_score(note_events, tempo_bpm=float(tempo_bpm), time_signature=time_sig)
-
-    musicxml_path = out / "result.musicxml"
-    export_musicxml(
-        musicxml_path,
-        quant.score,
+    export_chords_midi(
+        midi_path,
+        spelled,
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
-        key_signature_fifths=(quant.key_signature.fifths if quant.key_signature else None),
-        title="Audio Tabs",
-        instrument="piano",
+        root_octave=3,
     )
+
+    # PDF (LilyPond) best-effort: no fallar el job si LilyPond no está disponible.
+    try:
+        ly = build_lilypond_score(
+            spelled,
+            tempo_bpm=float(tempo_bpm),
+            time_signature=time_sig,
+            key_tonic=(key_sig.tonic if key_sig else None),
+            key_mode=(key_sig.mode if key_sig else "major"),
+            title=title,
+        )
+        render_lilypond_pdf(ly, out, basename="score")
+        pdf_error = None
+    except Exception as e:
+        pdf_error = f"No se pudo generar PDF (LilyPond): {e}"
 
     return JobResult(
         job_id=job_dir.name,
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
-        key_signature=quant.key_signature,
-        transcription_backend="basic_pitch",
-        transcription_error=None,
-        score=quant.score,
+        key_signature=key_sig,
+        chords=spelled,
+        transcription_backend="chords_template_viterbi",
+        transcription_error=pdf_error,
+        score=None,
     )
-

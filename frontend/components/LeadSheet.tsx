@@ -86,7 +86,16 @@ function buildChordSymbol(label: string) {
   cs.addGlyphOrText(parsed.root);
 
   const quality = parsed.quality;
-  const suffix = quality === "min" ? "m" : quality === "7" ? "7" : "";
+  const suffix =
+    quality === "min"
+      ? "m"
+      : quality === "7"
+        ? "7"
+        : quality === "maj7"
+          ? "maj7"
+          : quality === "min7"
+            ? "m7"
+            : "";
   if (suffix) cs.addTextSuperscript(suffix);
 
   return cs;

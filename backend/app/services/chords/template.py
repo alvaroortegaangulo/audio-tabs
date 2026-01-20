@@ -28,6 +28,7 @@ def _templates(vocab: str) -> List[Tuple[str, np.ndarray]]:
             "maj": [0,4,7],
             "min": [0,3,7],
             "7":   [0,4,7,10],
+            "min7": [0,3,7,10],
         }
 
     out = []

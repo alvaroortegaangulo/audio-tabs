@@ -82,6 +82,22 @@ def _duration_token_from_quarters(q: float) -> str:
     denom = max(1, min(64, denom))
     return str(denom)
 
+
+def _attach_duration_chordmode(tok: str, dur: str) -> str:
+    """
+    En chordmode, la duración va pegada a la raíz (antes de ':').
+    Ej:
+      - g + 8  => g8
+      - a:m + 8 => a8:m
+      - gis:7 + 8 => gis8:7   (evita gis:78, que es ambiguo)
+    """
+    if not dur:
+        return tok
+    if ":" in tok:
+        root, qual = tok.split(":", 1)
+        return f"{root}{dur}:{qual}"
+    return f"{tok}{dur}"
+
 def quantize_chords_to_grid(
     chords: List[ChordSegment],
     tempo_bpm: float,
@@ -197,7 +213,7 @@ def build_lilypond_score(
         # (LilyPond chordmode acepta: c8 c8 c8 ... perfectamente)
         dur_tok = _duration_token_from_quarters(grid)
         for _ in range(n):
-            chordmode_parts.append(f"{tok}{dur_tok}")
+            chordmode_parts.append(_attach_duration_chordmode(tok, dur_tok))
 
     chordmode = " ".join(chordmode_parts)
 
@@ -236,7 +252,7 @@ def build_lilypond_score(
     if key_tonic:
         lp_key = NOTE_TO_LILYPOND.get(key_tonic)
         if lp_key and key_mode in ("major", "minor"):
-            key_clause = f"  \\\\key {lp_key} \\\\{key_mode}\n"
+            key_clause = f"  \\key {lp_key} \\{key_mode}\n"
 
     ly = f"""
 \\version "2.24.0"
@@ -262,7 +278,7 @@ global = {{
   \\tempo 4 = {int(round(tempo_bpm or 120))}
 }}
 
-chords = \\chordmode {{
+chordsMusic = \\chordmode {{
   \\set chordChanges = ##t
   {chordmode}
 }}
@@ -290,10 +306,10 @@ rhythm = {{
 
 \\score {{
   <<
-    \\new ChordNames \\with {{ alignAboveContext = "staff" }} \\chords
+    \\new ChordNames \\with {{ alignAboveContext = "staff" }} {{ \\chordsMusic }}
     \\new Staff = "staff" \\with {{
       instrumentName = "Gtr."
-    }} \\rhythm
+    }} {{ \\rhythm }}
   >>
 }}
 """

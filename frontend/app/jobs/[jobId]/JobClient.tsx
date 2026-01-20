@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { getJob, getResult } from "@/lib/api";
+import LeadSheet from "@/components/LeadSheet";
 import ScoreViewer from "@/components/ScoreViewer";
 
 type JobClientProps = {
@@ -56,7 +57,15 @@ export default function JobClient({ jobId }: JobClientProps) {
         {error && <p style={{ color: "crimson" }}>{error}</p>}
       </div>
 
-      {status === "done" && jobId && result && <ScoreViewer jobId={jobId} result={result} />}
+      {status === "done" && jobId && result && (
+        <>
+          {Array.isArray(result?.chords) ? (
+            <LeadSheet jobId={jobId} result={result} />
+          ) : (
+            <ScoreViewer jobId={jobId} result={result} />
+          )}
+        </>
+      )}
     </>
   );
 }

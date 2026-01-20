@@ -1,0 +1,1226 @@
+{
+  "job_id": "ae490be1171a4c2faacbf81be5b85f23",
+  "tempo_bpm": 139.6748310810811,
+  "time_signature": "4/4",
+  "key_signature": {
+    "tonic": "C",
+    "mode": "major",
+    "fifths": 0,
+    "name": "C major",
+    "vexflow": "C",
+    "use_flats": false,
+    "score": 1.0
+  },
+  "transcription_backend": "basic_pitch",
+  "transcription_error": null,
+  "score": {
+    "grid_q": 0.25,
+    "grid_kind": "straight",
+    "measures": [
+      {
+        "number": 1,
+        "items": [
+          {
+            "rest": true,
+            "keys": [],
+            "duration": "q",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3"
+            ],
+            "duration": "h",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3",
+              "g/3",
+              "b/3"
+            ],
+            "duration": "8",
+            "dots": 1,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      },
+      {
+        "number": 2,
+        "items": [
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3",
+              "g/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3",
+              "d/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "f#/2",
+              "d/3",
+              "f#/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/3",
+              "f#/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3",
+              "f#/4"
+            ],
+            "duration": "q",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "a/2",
+              "d/3",
+              "f#/4"
+            ],
+            "duration": "8",
+            "dots": 1,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      },
+      {
+        "number": 3,
+        "items": [
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "a/2",
+              "d/3",
+              "f#/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3",
+              "f#/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/2",
+              "e/3",
+              "a/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "e/2",
+              "a/2"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "e/2",
+              "a/2",
+              "c/3"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "e/2",
+              "a/2",
+              "c/3",
+              "g/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "e/2",
+              "a/2",
+              "c/3",
+              "e/4",
+              "g/4",
+              "e/5"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/2",
+              "c/3",
+              "e/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "e/2",
+              "a/2",
+              "c/3",
+              "e/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "e/2",
+              "a/2",
+              "c/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      },
+      {
+        "number": 4,
+        "items": [
+          {
+            "rest": false,
+            "keys": [
+              "e/2",
+              "a/2",
+              "c/3",
+              "c/4",
+              "g/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "e/2",
+              "a/2",
+              "c/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "g/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "g/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "c/3",
+              "e/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/2",
+              "c/3",
+              "e/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "c/3",
+              "c/4",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "e/3",
+              "a/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "e/3",
+              "a/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "d/3",
+              "e/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      },
+      {
+        "number": 5,
+        "items": [
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "d/3",
+              "e/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/1",
+              "a/2",
+              "e/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/2"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/3"
+            ],
+            "duration": "8",
+            "dots": 1,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "d/3",
+              "g/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "a/2",
+              "d/3",
+              "g/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "a/2",
+              "d/3",
+              "g/3",
+              "b/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "g/3",
+              "b/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "d/3",
+              "g/3",
+              "b/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "d/3",
+              "g/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "g/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/3",
+              "g/4"
+            ],
+            "duration": "8",
+            "dots": 1,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      },
+      {
+        "number": 6,
+        "items": [
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "d/4",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "d/3",
+              "d/4",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "d/3",
+              "b/3",
+              "d/4",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "g/2",
+              "b/3",
+              "d/4",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "d/2",
+              "d/3",
+              "g/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "d/2",
+              "d/3",
+              "f#/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "d/2",
+              "d/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/1",
+              "d/2",
+              "d/3",
+              "f#/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3",
+              "f#/3",
+              "f#/4"
+            ],
+            "duration": "q",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3",
+              "f#/3",
+              "d/4",
+              "f#/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3",
+              "f#/3",
+              "d/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3",
+              "f#/3",
+              "d/4",
+              "f#/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      },
+      {
+        "number": 7,
+        "items": [
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "f#/3",
+              "d/4",
+              "f#/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "f#/3",
+              "d/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3",
+              "f#/3",
+              "d/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "f#/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "g/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "g/3"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "c/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "e/4"
+            ],
+            "duration": "8",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "e/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      },
+      {
+        "number": 8,
+        "items": [
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "e/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "c/4",
+              "e/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "e/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "c/4",
+              "e/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/3",
+              "e/3",
+              "c/4",
+              "e/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/3",
+              "e/3",
+              "c/4"
+            ],
+            "duration": "8",
+            "dots": 1,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "g/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "c/2",
+              "c/3",
+              "e/3",
+              "g/3"
+            ],
+            "duration": "q",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      },
+      {
+        "number": 9,
+        "items": [
+          {
+            "rest": false,
+            "keys": [
+              "b/2",
+              "e/3",
+              "g/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "e/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "a/2",
+              "e/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "a/2",
+              "d/3",
+              "g/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "d/2",
+              "d/3",
+              "g/3",
+              "c/4"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3",
+              "g/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3",
+              "g/3",
+              "b/3"
+            ],
+            "duration": "q",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          },
+          {
+            "rest": false,
+            "keys": [
+              "g/2",
+              "d/3",
+              "g/3"
+            ],
+            "duration": "16",
+            "dots": 0,
+            "tuplet": null,
+            "tie": null
+          }
+        ]
+      }
+    ]
+  }
+}

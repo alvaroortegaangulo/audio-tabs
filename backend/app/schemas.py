@@ -53,6 +53,7 @@ class JobResult(BaseModel):
     tempo_bpm: float
     time_signature: str
     key_signature: Optional[KeySignature] = None
+    chords: List[ChordSegment] = []
     transcription_backend: Optional[str] = None
     transcription_error: Optional[str] = None
     score: Optional[ScoreData] = None
