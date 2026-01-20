@@ -1,0 +1,5 @@
+{
+  "job_id": "cf00c0a535b14bfe8f0ed20ec59cff95",
+  "status": "error",
+  "error": "In part (Guitar), measure (1): Cannot convert inexpressible durations to MusicXML."
+}

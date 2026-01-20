@@ -1,0 +1,73 @@
+{
+  "job_id": "bce426fcdb0445268e17fd0a927547f1",
+  "tempo_bpm": 69.83741554054055,
+  "time_signature": "4/4",
+  "key_signature": {
+    "tonic": "G",
+    "mode": "major",
+    "fifths": 1,
+    "name": "G major",
+    "vexflow": "G",
+    "use_flats": false,
+    "score": 0.9668334126472473
+  },
+  "chords": [
+    {
+      "start": 0.0,
+      "end": 0.3366893529891968,
+      "label": "G#:7",
+      "confidence": 0.023652558825139343
+    },
+    {
+      "start": 0.3366893529891968,
+      "end": 2.287165641784668,
+      "label": "G:maj",
+      "confidence": 0.03056600902761732
+    },
+    {
+      "start": 2.287165641784668,
+      "end": 4.109931945800781,
+      "label": "D:maj",
+      "confidence": 0.033474135811731316
+    },
+    {
+      "start": 4.109931945800781,
+      "end": 7.163355827331543,
+      "label": "A:min7",
+      "confidence": 0.03002276746095813
+    },
+    {
+      "start": 7.163355827331543,
+      "end": 9.171881675720215,
+      "label": "G:maj",
+      "confidence": 0.028037656518506867
+    },
+    {
+      "start": 9.171881675720215,
+      "end": 10.959818840026855,
+      "label": "D:maj",
+      "confidence": 0.031514306117284605
+    },
+    {
+      "start": 10.959818840026855,
+      "end": 13.827483177185059,
+      "label": "C:maj",
+      "confidence": 0.03135500193728127
+    },
+    {
+      "start": 13.827483177185059,
+      "end": 14.489252090454102,
+      "label": "E:min7",
+      "confidence": 0.02650444356626586
+    },
+    {
+      "start": 14.489252090454102,
+      "end": 15.313560485839844,
+      "label": "G:maj",
+      "confidence": 0.030086541259792488
+    }
+  ],
+  "transcription_backend": "chords_template_viterbi",
+  "transcription_error": null,
+  "score": null
+}

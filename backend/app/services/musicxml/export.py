@@ -14,6 +14,7 @@ from music21 import harmony as m21harmony
 from music21 import clef as m21clef
 from music21 import layout as m21layout
 from music21 import articulations as m21articulations
+from music21 import duration as m21duration
 from music21 import interval as m21interval
 from music21 import pitch as m21pitch
 
@@ -28,6 +29,36 @@ _DURATION_Q = {
     "16": 0.25,
     "32": 0.125,
 }
+
+_DURATION_M21 = {
+    "w": "whole",
+    "h": "half",
+    "q": "quarter",
+    "8": "eighth",
+    "16": "16th",
+    "32": "32nd",
+}
+
+
+def _m21_duration(duration: str, dots: int, tuplet: tuple[int, int] | None) -> m21duration.Duration:
+    """
+    Construye un Duration explícito para evitar que music21 infiera duraciones
+    "complex" (no exportables a MusicXML) por errores de redondeo.
+    """
+    d_type = _DURATION_M21.get(duration)
+    if d_type is None:
+        raise ValueError(f"Unsupported duration: {duration}")
+
+    d = m21duration.Duration(d_type)
+    d.dots = int(dots or 0)
+
+    if tuplet is not None:
+        num_notes, notes_occupied = tuplet
+        # Ej: 3:2 para corcheas tresillo (cada nota = 1/3 de negra)
+        d.appendTuplet(m21duration.Tuplet(int(num_notes), int(notes_occupied)))
+
+    return d
+
 
 def _quarter_length(duration: str, dots: int, tuplet: tuple[int, int] | None) -> float:
     base = _DURATION_Q.get(duration)
@@ -154,24 +185,63 @@ def export_musicxml(
     except:
         ts_num, ts_den = 4, 4
 
-    seconds_per_beat = 60.0 / tempo_bpm
-    seconds_per_measure = seconds_per_beat * ts_num
     quarter_length_per_measure = float(ts_num) * (4.0 / float(ts_den))
+    beat_quarters = 4.0 / float(ts_den)
+
+    sec_per_q = 60.0 / float(tempo_bpm if tempo_bpm else 120.0)
+    seconds_per_measure = sec_per_q * quarter_length_per_measure
+    seconds_per_beat = sec_per_q * beat_quarters
+    chords_sorted = sorted(chords or [], key=lambda c: float(c.start))
 
     def get_chords_for_measure(measure_idx: int) -> List[tuple[float, str]]:
-        if not chords:
+        if not chords_sorted:
             return []
 
         m_start_time = measure_idx * seconds_per_measure
         m_end_time = m_start_time + seconds_per_measure
 
-        found = []
-        for c in chords:
-            if m_start_time <= c.start < m_end_time:
-                rel_time = c.start - m_start_time
-                offset_q = (rel_time / seconds_per_measure) * quarter_length_per_measure
-                found.append((offset_q, c.label))
-        return found
+        # IMPORTANTE: Insertar ChordSymbol en offsets arbitrarios hace que music21
+        # parta notas/rests en duraciones no expresables (e.g. 2048th), rompiendo
+        # la exportación a MusicXML. Cuantizamos a inicios de beat.
+        def label_at(t: float) -> str:
+            for c in chords_sorted:
+                if float(c.end) <= t:
+                    continue
+                if float(c.start) <= t < float(c.end):
+                    return str(c.label or "N")
+                if float(c.start) > t:
+                    break
+            return "N"
+
+        by_beat: dict[int, str] = {}
+
+        # Chord al inicio del compás (si aplica)
+        start_lbl = label_at(m_start_time + 1e-6)
+        if start_lbl != "N":
+            by_beat[0] = start_lbl
+
+        # Cambios dentro del compás: cuantiza hacia abajo al inicio del beat.
+        for c in chords_sorted:
+            c_start = float(c.start)
+            if c_start < m_start_time or c_start >= m_end_time:
+                continue
+            if not c.label or c.label == "N":
+                continue
+            beat_idx = int((c_start - m_start_time) / max(seconds_per_beat, 1e-9))
+            beat_idx = max(0, min(ts_num - 1, beat_idx))
+            by_beat[beat_idx] = str(c.label)
+
+        out: list[tuple[float, str]] = []
+        prev = ""
+        for b in range(ts_num):
+            lbl = by_beat.get(b)
+            if not lbl:
+                continue
+            if b == 0 or lbl != prev:
+                out.append((float(b) * beat_quarters, lbl))
+            prev = lbl
+
+        return out
 
     # Transposition interval for Guitar Notation (Sounding -> Written: Up 1 octave)
     transpose_interval = m21interval.Interval('P8')
@@ -204,11 +274,13 @@ def export_musicxml(
             tuplet = None
             if item.tuplet is not None:
                 tuplet = (int(item.tuplet.num_notes), int(item.tuplet.notes_occupied))
-            ql = _quarter_length(item.duration, int(item.dots), tuplet)
+            dur = _m21_duration(item.duration, int(item.dots), tuplet)
 
             if item.rest or not item.keys:
-                obj_not = m21note.Rest(quarterLength=ql)
-                obj_tab = m21note.Rest(quarterLength=ql)
+                obj_not = m21note.Rest()
+                obj_not.duration = dur
+                obj_tab = m21note.Rest()
+                obj_tab.duration = dur
             else:
                 pitches_str = [_vf_key_to_m21_pitch(k) for k in item.keys]
 
@@ -221,9 +293,11 @@ def export_musicxml(
                     written_pitches.append(p)
 
                 if len(written_pitches) == 1:
-                    obj_not = m21note.Note(written_pitches[0], quarterLength=ql)
+                    obj_not = m21note.Note(written_pitches[0])
+                    obj_not.duration = dur
                 else:
-                    obj_not = m21chord.Chord(written_pitches, quarterLength=ql)
+                    obj_not = m21chord.Chord(written_pitches)
+                    obj_not.duration = dur
 
                 # --- Tab Notation Object ---
                 # Use original (sounding) pitches to calculate fret positions
@@ -231,14 +305,16 @@ def export_musicxml(
 
                 if len(sounding_pitches) == 1:
                     p = sounding_pitches[0]
-                    obj_tab = m21note.Note(p, quarterLength=ql)
+                    obj_tab = m21note.Note(p)
+                    obj_tab.duration = dur
                     s, f = _get_preferred_tab_position(p.midi)
                     if s > 0:
                         obj_tab.articulations.append(m21articulations.StringIndication(s))
                         obj_tab.articulations.append(m21articulations.FretIndication(f))
                 else:
                     # Tab Chord
-                    obj_tab = m21chord.Chord(sounding_pitches, quarterLength=ql)
+                    obj_tab = m21chord.Chord(sounding_pitches)
+                    obj_tab.duration = dur
                     for cn in obj_tab.notes:
                         s, f = _get_preferred_tab_position(cn.pitch.midi)
                         if s > 0:
