@@ -25,6 +25,48 @@ def _job_title(job_dir: Path, input_path: Path) -> str:
         pass
     return input_path.stem or "Lead Sheet"
 
+# Chords imports
+from app.services.chords.template import (
+    build_chord_library,
+    chroma_features,
+    emission_probs,
+    frames_to_segments,
+    finalize_segments,
+    Segment
+)
+from app.services.chords.viterbi import viterbi_decode
+
+
+def detect_chords(y, sr) -> list[Segment]:
+    """
+    Runs the Viterbi-based chord detection pipeline.
+    """
+    # 1. Compute Chroma
+    chroma = chroma_features(y, sr)
+
+    # 2. Build Library (Maj/Min/7)
+    labels, T = build_chord_library(vocab="majmin7")
+
+    # 3. Compute Probabilities
+    probs = emission_probs(chroma, labels, T)
+
+    # 4. Viterbi Decode
+    # switch_penalty tunes how often chords change.
+    # -5.0 is a reasonable starting point for log-prob costs.
+    path, conf = viterbi_decode(probs, switch_penalty=-5.0)
+
+    # 5. Convert to Segments
+    hop_length = 512
+    times = [i * hop_length / sr for i in range(len(path))]
+
+    # Minimum chord length in seconds (e.g. 0.5s)
+    raw_segs = frames_to_segments(path, conf, times, min_len=0.5)
+
+    # 6. Finalize (map indices to labels)
+    segs = finalize_segments(raw_segs, labels)
+
+    return segs
+
 
 def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     work = job_dir / "work"
