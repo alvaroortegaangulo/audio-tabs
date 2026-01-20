@@ -18,6 +18,12 @@ class Settings(BaseSettings):
     DEMUCS_MODEL: str = "htdemucs"
     DEMUCS_DEVICE: str = "auto"  # auto|cpu|cuda
 
+    ENABLE_BASIC_PITCH: bool = True
+    BASIC_PITCH_ONSET_THRESHOLD: float = 0.5
+    BASIC_PITCH_FRAME_THRESHOLD: float = 0.3
+    BASIC_PITCH_MIN_NOTE_MS: float = 127.70
+    BASIC_PITCH_HOP_SEC: float = 0.05
+
     CHORD_VOCAB: str = "majmin7"  # majmin|majmin7
     SWITCH_PENALTY: float = 2.5
     MIN_SEGMENT_SEC: float = 0.25

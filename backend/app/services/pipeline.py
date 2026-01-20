@@ -1,19 +1,14 @@
 from __future__ import annotations
+
 from pathlib import Path
-import numpy as np
-import librosa
 
 from app.core.config import settings
-from app.schemas import ChordSegment, JobResult
+from app.schemas import JobResult
+from app.services.amt.basic_pitch import save_note_events_csv, transcribe_basic_pitch
 from app.services.audio import ffmpeg_to_wav_mono_44k, load_wav, peak_normalize
 from app.services.grid.beats import estimate_beats_librosa
-from app.services.chords.template import (
-    build_chord_library, chroma_features, emission_probs,
-    frames_to_segments, finalize_segments
-)
-from app.services.chords.viterbi import viterbi_decode
 from app.services.musicxml.export import export_musicxml
-from app.services.engraving.lilypond import build_lilypond_score, render_lilypond_pdf, QuantCfg
+from app.services.theory.quantize import quantize_note_events_to_score
 
 
 def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
@@ -28,49 +23,47 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     y, sr = load_wav(wav_path)
     y = peak_normalize(y)
 
-    # (v1) Sin Demucs por defecto (feature-flag listo para v2)
-    # Si ENABLE_DEMUCS=1, aquí mezclarías "other"+"bass" y usarías esa señal.
-    # Demucs v4 (htdemucs/htdemucs_ft) documentado. :contentReference[oaicite:6]{index=6}
+    tempo_bpm, _beat_times = estimate_beats_librosa(y, sr)
+    if not tempo_bpm or tempo_bpm <= 0:
+        tempo_bpm = 120.0
 
-    tempo_bpm, beat_times = estimate_beats_librosa(y, sr)
+    if not settings.ENABLE_BASIC_PITCH:
+        raise RuntimeError("ENABLE_BASIC_PITCH=0: Basic Pitch es obligatorio en este pipeline.")
 
-    hop_length = 512
-    chroma = chroma_features(y, sr, hop_length=hop_length)
-    labels, T = build_chord_library(settings.CHORD_VOCAB)
-    probs = emission_probs(chroma, labels, T)
+    midi_data, note_events = transcribe_basic_pitch(
+        wav_path,
+        midi_tempo=float(tempo_bpm),
+        onset_threshold=float(settings.BASIC_PITCH_ONSET_THRESHOLD),
+        frame_threshold=float(settings.BASIC_PITCH_FRAME_THRESHOLD),
+        minimum_note_length_ms=float(settings.BASIC_PITCH_MIN_NOTE_MS),
+        melodia_trick=True,
+    )
 
-    path, conf = viterbi_decode(probs, switch_penalty=float(settings.SWITCH_PENALTY))
+    midi_path = out / "transcription.mid"
+    midi_data.write(str(midi_path))
+    save_note_events_csv(note_events, out / "note_events.csv")
 
-    times = librosa.frames_to_time(np.arange(chroma.shape[1]), sr=sr, hop_length=hop_length).astype(np.float32)
-    raw = frames_to_segments(path, conf, times, min_len=float(settings.MIN_SEGMENT_SEC))
-    segs = finalize_segments(raw, labels)
-
-    chords = [ChordSegment(start=s.start, end=s.end, label=s.label, confidence=s.confidence) for s in segs]
     time_sig = "4/4"
+    quant = quantize_note_events_to_score(note_events, tempo_bpm=float(tempo_bpm), time_signature=time_sig)
 
     musicxml_path = out / "result.musicxml"
-    export_musicxml(musicxml_path, chords=chords, tempo_bpm=float(tempo_bpm), time_signature=time_sig)
-
-    # PDF "Real Book" (engraving profesional con LilyPond)
-    try:
-        ly = build_lilypond_score(
-            chords=chords,
-            tempo_bpm=float(tempo_bpm),
-            time_signature=time_sig,
-            title="Chord Extractor",
-            composer="",
-            cfg=QuantCfg(grid_q=0.5),  # corchea por defecto (tu requisito)
-            rehearsal_every_measures=8,
-        )
-        render_lilypond_pdf(ly, out, basename="score")
-    except Exception as e:
-        # No rompemos el job si lilypond no está disponible; nos quedamos con MusicXML
-        # (en docker sí estará)
-        pass
+    export_musicxml(
+        musicxml_path,
+        quant.score,
+        tempo_bpm=float(tempo_bpm),
+        time_signature=time_sig,
+        key_signature_fifths=(quant.key_signature.fifths if quant.key_signature else None),
+        title="Audio Tabs",
+        instrument="piano",
+    )
 
     return JobResult(
         job_id=job_dir.name,
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
-        chords=chords,
+        key_signature=quant.key_signature,
+        transcription_backend="basic_pitch",
+        transcription_error=None,
+        score=quant.score,
     )
+

@@ -1,58 +1,110 @@
 from __future__ import annotations
-from pathlib import Path
-from typing import List
-from music21 import stream, meter, tempo as m21tempo, harmony, note, instrument
 
-from app.schemas import ChordSegment
+from pathlib import Path
+
+from music21 import chord as m21chord
+from music21 import instrument as m21instrument
+from music21 import key as m21key
+from music21 import meter as m21meter
+from music21 import note as m21note
+from music21 import stream as m21stream
+from music21 import tempo as m21tempo
+
+from app.schemas import ScoreData
+
+
+_DURATION_Q = {
+    "w": 4.0,
+    "h": 2.0,
+    "q": 1.0,
+    "8": 0.5,
+    "16": 0.25,
+    "32": 0.125,
+}
+
+
+def _quarter_length(duration: str, dots: int, tuplet: tuple[int, int] | None) -> float:
+    base = _DURATION_Q.get(duration)
+    if base is None:
+        raise ValueError(f"Unsupported duration: {duration}")
+
+    q = float(base)
+    if dots:
+        add = q / 2.0
+        for _ in range(int(dots)):
+            q += add
+            add /= 2.0
+
+    if tuplet is not None:
+        num_notes, notes_occupied = tuplet
+        q *= float(notes_occupied) / float(num_notes)
+
+    return float(q)
+
+
+def _vf_key_to_m21_pitch(key: str) -> str:
+    """
+    VexFlow key: 'c#/4' -> music21 pitch: 'C#4'
+    """
+    pitch, octave = key.split("/")
+    pitch = pitch.strip()
+    octave = octave.strip()
+    if not pitch or not octave:
+        raise ValueError(f"Invalid vexflow key: {key}")
+    return pitch[0].upper() + pitch[1:] + octave
+
 
 def export_musicxml(
     out_path: Path,
-    chords: List[ChordSegment],
+    score_data: ScoreData,
+    *,
     tempo_bpm: float,
     time_signature: str = "4/4",
-    title: str = "Chord Extraction"
+    key_signature_fifths: int | None = None,
+    title: str = "Transcription",
+    instrument: str = "piano",
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    score = stream.Score()
+    score = m21stream.Score()
     score.metadata = None
 
-    part = stream.Part()
-    part.insert(0, instrument.Guitar())
-    part.insert(0, meter.TimeSignature(time_signature))
-    part.insert(0, m21tempo.MetronomeMark(number=tempo_bpm))
+    part = m21stream.Part()
+    if instrument == "guitar":
+        part.insert(0, m21instrument.Guitar())
+    else:
+        part.insert(0, m21instrument.Piano())
 
-    # Duración total aproximada
-    total_sec = max((c.end for c in chords), default=0.0)
-    # Aprox beats
-    beats_per_sec = tempo_bpm / 60.0
-    total_beats = max(1, int(total_sec * beats_per_sec) + 1)
+    part.insert(0, m21meter.TimeSignature(time_signature))
+    if key_signature_fifths is not None:
+        part.insert(0, m21key.KeySignature(int(key_signature_fifths)))
+    part.insert(0, m21tempo.MetronomeMark(number=float(tempo_bpm)))
 
-    beats_per_measure = int(time_signature.split("/")[0])
-    num_measures = int((total_beats + beats_per_measure - 1) / beats_per_measure)
+    for meas in score_data.measures:
+        m = m21stream.Measure(number=int(meas.number))
+        for item in meas.items:
+            tuplet = None
+            if item.tuplet is not None:
+                tuplet = (int(item.tuplet.num_notes), int(item.tuplet.notes_occupied))
+            ql = _quarter_length(item.duration, int(item.dots), tuplet)
 
-    # Crea compases con silencios
-    for m in range(num_measures):
-        meas = stream.Measure(number=m+1)
-        meas.append(note.Rest(quarterLength=beats_per_measure))
-        part.append(meas)
+            if item.rest or not item.keys:
+                obj = m21note.Rest(quarterLength=ql)
+            else:
+                pitches = [_vf_key_to_m21_pitch(k) for k in item.keys]
+                if len(pitches) == 1:
+                    obj = m21note.Note(pitches[0], quarterLength=ql)
+                else:
+                    obj = m21chord.Chord(pitches, quarterLength=ql)
 
-    # Inserta acordes como "harmony" en offsets de compás
-    for c in chords:
-        if c.label == "N":
-            continue
-        start_beat = (c.start * beats_per_sec)
-        measure_idx = int(start_beat // beats_per_measure)
-        offset_in_measure = float(start_beat - measure_idx * beats_per_measure)
+            m.append(obj)
+        part.append(m)
 
-        # clamp
-        if measure_idx < 0:
-            continue
-        if measure_idx >= len(part.getElementsByClass(stream.Measure)):
-            continue
-
-        cs = harmony.ChordSymbol(c.label.replace(":", ""))  # "Cmaj", "Amin", "E7"
-        part.measure(measure_idx+1).insert(offset_in_measure, cs)
+    try:
+        part.makeBeams(inPlace=True)
+    except Exception:
+        pass
 
     score.append(part)
     score.write("musicxml", fp=str(out_path))
+

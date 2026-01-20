@@ -151,6 +151,8 @@ def build_lilypond_score(
     chords: List[ChordSegment],
     tempo_bpm: float,
     time_signature: str = "4/4",
+    key_tonic: str | None = None,
+    key_mode: str = "major",
     title: str = "Lead Sheet",
     composer: str = "",
     cfg: QuantCfg = QuantCfg(grid_q=0.5),
@@ -230,6 +232,12 @@ def build_lilypond_score(
         slash_bars.append("|")
     slashes = " ".join(slash_bars)
 
+    key_clause = ""
+    if key_tonic:
+        lp_key = NOTE_TO_LILYPOND.get(key_tonic)
+        if lp_key and key_mode in ("major", "minor"):
+            key_clause = f"  \\\\key {lp_key} \\\\{key_mode}\n"
+
     ly = f"""
 \\version "2.24.0"
 
@@ -250,7 +258,7 @@ def build_lilypond_score(
 
 global = {{
   \\numericTimeSignature
-  \\time {num}/{den}
+{key_clause}  \\time {num}/{den}
   \\tempo 4 = {int(round(tempo_bpm or 120))}
 }}
 

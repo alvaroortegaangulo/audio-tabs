@@ -90,3 +90,19 @@ def get_score_pdf(job_id: str):
     if not pdf_path.exists():
         raise HTTPException(404, "Score PDF not ready")
     return FileResponse(str(pdf_path), media_type="application/pdf", filename="score.pdf")
+
+@router.get("/{job_id}/transcription.mid")
+def get_transcription_midi(job_id: str):
+    job_dir = storage.job_dir(job_id)
+    midi_path = job_dir / "out" / "transcription.mid"
+    if not midi_path.exists():
+        raise HTTPException(404, "MIDI transcription not ready")
+    return FileResponse(str(midi_path), media_type="audio/midi", filename="transcription.mid")
+
+@router.get("/{job_id}/note_events.csv")
+def get_note_events(job_id: str):
+    job_dir = storage.job_dir(job_id)
+    p = job_dir / "out" / "note_events.csv"
+    if not p.exists():
+        raise HTTPException(404, "Note events not ready")
+    return FileResponse(str(p), media_type="text/csv", filename="note_events.csv")
