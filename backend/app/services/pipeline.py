@@ -16,7 +16,6 @@ from app.services.audio import ffmpeg_to_wav_mono_44k, load_wav, peak_normalize
 from app.services.chords.extract import extract_chords_template
 from app.services.grid.beats import estimate_beats_librosa, normalize_beat_times
 from app.services.engraving.lilypond import build_lilypond_score, render_lilypond_pdf
-from app.services.midi.export import export_chords_midi
 from app.services.musicxml.lead_sheet import export_lead_sheet_musicxml
 from app.services.theory.key import estimate_key_from_chroma, spell_chord_label, NOTE_TO_PC
 
@@ -1102,6 +1101,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     tab_positions: list[list[list[tuple[int, int]]]] | None = None
     segment_shapes: list[tuple[ChordSegment, Shape | None]] = []
     note_events_debug = note_events
+    score_m21: object | None = None
 
     if is_accompaniment:
         try:
@@ -1139,6 +1139,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         )
         score_data = quant_res.score
         pickup_quarters = float(quant_res.pickup_quarters)
+        score_m21 = quant_res.score_m21
 
     # --- Debug artifacts ---
     try:
@@ -1193,7 +1194,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     # --- 4. Export MusicXML (Full Lead Sheet with Tab) ---
     export_musicxml(
         musicxml_path,
-        score_data,
+        score_m21 if score_m21 is not None else score_data,
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
         key_signature_fifths=(key_sig.fifths if key_sig else None),
@@ -1204,32 +1205,8 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         pickup_quarters=float(pickup_quarters),
         slash_notation=bool(is_accompaniment),
         tab_positions=tab_positions,
+        midi_path=(out / "transcription.mid"),
     )
-
-    midi_path = out / "transcription.mid"
-    midi_start = 0.0
-    if spelled_chords:
-        midi_start = min(0.0, min(float(c.start) for c in spelled_chords))
-    if is_accompaniment and strum_onsets.size > 0:
-        midi_start = min(float(midi_start), float(np.min(strum_onsets)))
-        export_chords_midi(
-            midi_path,
-            spelled_chords,
-            tempo_bpm=float(tempo_bpm),
-            time_signature=time_sig,
-            root_octave=3,
-            start_time_s=float(midi_start),
-            onset_times_s=[float(t) for t in strum_onsets],
-        )
-    else:
-        export_chords_midi(
-            midi_path,
-            spelled_chords,
-            tempo_bpm=float(tempo_bpm),
-            time_signature=time_sig,
-            root_octave=3,
-            start_time_s=float(midi_start),
-        )
 
     # PDF (LilyPond) generation - kept as fallback/supplement
     # Ideally LilyPond service should also be updated to support full score,

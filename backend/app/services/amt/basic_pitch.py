@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+# NOTE: This module now wraps Omnizart; consider renaming to transcribe.py.
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+import inspect
+import os
+import tempfile
 
 import numpy as np
 
@@ -17,18 +22,61 @@ class NoteEvent:
 
 
 _MODEL = None
+_MODEL_PATH: str | None = None
+_MODEL_NAME = "music-v1"
 
 
-def _get_model():
-    global _MODEL
-    if _MODEL is not None:
-        return _MODEL
+def _configure_omnizart_env() -> None:
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
+    os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+    try:
+        import tensorflow as tf  # type: ignore
 
-    from basic_pitch import ICASSP_2022_MODEL_PATH
-    from basic_pitch.inference import Model
+        try:
+            tf.config.set_visible_devices([], "GPU")
+        except Exception:
+            pass
+        count = int(os.cpu_count() or 1)
+        try:
+            tf.config.threading.set_intra_op_parallelism_threads(count)
+            tf.config.threading.set_inter_op_parallelism_threads(max(1, count // 2))
+        except Exception:
+            pass
+    except Exception:
+        return
 
-    _MODEL = Model(ICASSP_2022_MODEL_PATH)
-    return _MODEL
+
+def _get_model() -> tuple[object | None, str | None]:
+    global _MODEL, _MODEL_PATH
+    if _MODEL is not None or _MODEL_PATH is not None:
+        return _MODEL, _MODEL_PATH
+
+    _configure_omnizart_env()
+
+    from omnizart.music import app as music_app  # type: ignore
+
+    model_obj = None
+    model_path: str | None = None
+
+    if hasattr(music_app, "load_model"):
+        try:
+            model_obj = music_app.load_model(_MODEL_NAME)
+        except TypeError:
+            model_obj = music_app.load_model()
+
+    if isinstance(model_obj, (str, Path)):
+        model_path = str(model_obj)
+        model_obj = None
+    elif isinstance(model_obj, tuple):
+        for item in model_obj:
+            if isinstance(item, (str, Path)):
+                model_path = str(item)
+            else:
+                model_obj = item
+
+    _MODEL = model_obj
+    _MODEL_PATH = model_path
+    return _MODEL, _MODEL_PATH
 
 
 def _enforce_thresholds(
@@ -36,7 +84,6 @@ def _enforce_thresholds(
     frame_threshold: float,
     minimum_note_length_ms: float,
 ) -> tuple[float, float, float]:
-    # Respect settings but keep values in valid ranges.
     onset = min(1.0, max(0.0, float(onset_threshold)))
     frame = min(1.0, max(0.0, float(frame_threshold)))
     min_len_ms = max(20.0, float(minimum_note_length_ms))
@@ -100,6 +147,116 @@ def _clean_note_events(
     return sorted(out, key=lambda e: e.start_time_s)
 
 
+def _normalize_velocity(value: float | int | None) -> tuple[int, float]:
+    if value is None:
+        return 80, 0.63
+    try:
+        v = float(value)
+    except Exception:
+        return 80, 0.63
+    if v <= 0:
+        return 1, 0.01
+    if v <= 1.0:
+        vel = max(1, min(127, int(round(v * 127.0))))
+        return vel, max(0.01, min(1.0, float(v)))
+    vel = max(1, min(127, int(round(v))))
+    amp = max(0.01, min(1.0, vel / 127.0))
+    return vel, amp
+
+
+def _note_fields(note: object) -> tuple[float | None, float | None, int | None, float | int | None]:
+    if isinstance(note, dict):
+        start = note.get("start_time", note.get("start", note.get("onset")))
+        end = note.get("end_time", note.get("end", note.get("offset")))
+        pitch = note.get("pitch", note.get("note", note.get("pitch_midi")))
+        velocity = note.get("velocity", note.get("velocity_midi", note.get("confidence")))
+        return start, end, pitch, velocity
+
+    for attr in ("start_time", "start", "onset"):
+        if hasattr(note, attr):
+            start = getattr(note, attr)
+            break
+    else:
+        start = None
+
+    for attr in ("end_time", "end", "offset"):
+        if hasattr(note, attr):
+            end = getattr(note, attr)
+            break
+    else:
+        end = None
+
+    for attr in ("pitch", "note", "pitch_midi"):
+        if hasattr(note, attr):
+            pitch = getattr(note, attr)
+            break
+    else:
+        pitch = None
+
+    for attr in ("velocity", "velocity_midi", "confidence"):
+        if hasattr(note, attr):
+            velocity = getattr(note, attr)
+            break
+    else:
+        velocity = None
+
+    return start, end, pitch, velocity
+
+
+def _extract_notes(result: object) -> list[object]:
+    if result is None:
+        return []
+    if isinstance(result, (list, tuple)):
+        # If it's a list of notes, return directly.
+        if len(result) == 0:
+            return []
+        if not isinstance(result, tuple):
+            return list(result)
+        for item in result:
+            if isinstance(item, list):
+                return list(item)
+            if isinstance(item, tuple) and item and not isinstance(item[0], (str, Path)):
+                return list(item)
+        return list(result)
+    if hasattr(result, "notes"):
+        return list(getattr(result, "notes"))
+    if isinstance(result, dict):
+        for key in ("notes", "note_events", "events"):
+            if key in result:
+                return list(result[key])
+    return []
+
+
+def _find_midi_file(output_dir: Path) -> Path | None:
+    for ext in ("*.mid", "*.midi"):
+        for p in output_dir.rglob(ext):
+            return p
+    return None
+
+
+def _notes_from_midi(midi_path: Path) -> tuple[object | None, list[NoteEvent]]:
+    try:
+        import pretty_midi  # type: ignore
+    except Exception:
+        return None, []
+
+    pm = pretty_midi.PrettyMIDI(str(midi_path))
+    events: list[NoteEvent] = []
+    for inst in pm.instruments:
+        for note in inst.notes:
+            vel, amp = _normalize_velocity(note.velocity)
+            events.append(
+                NoteEvent(
+                    start_time_s=float(note.start),
+                    end_time_s=float(note.end),
+                    pitch_midi=int(note.pitch),
+                    velocity=int(vel),
+                    amplitude=float(amp),
+                )
+            )
+    return pm, events
+
+
 def transcribe_basic_pitch(
     audio_path: Path,
     *,
@@ -111,19 +268,14 @@ def transcribe_basic_pitch(
     min_velocity: int = 30,
     keep_melody: bool = True,
     melody_window_s: float = 0.08,
-) -> tuple[object, list[NoteEvent]]:
+) -> tuple[object | None, list[NoteEvent]]:
     """
-    Run Spotify Basic Pitch on an audio file.
+    Run Omnizart music transcription on an audio file.
 
-    Returns a tuple (pretty_midi_object, note_events).
+    Returns a tuple (pretty_midi_object_or_None, note_events).
     """
-    from basic_pitch.inference import predict
-
-    model = _get_model()
-
-    # basic_pitch.predict prints to stdout; avoid polluting worker logs.
-    import io
-    from contextlib import redirect_stdout
+    _ = melodia_trick
+    _ = midi_tempo
 
     onset_threshold, frame_threshold, minimum_note_length_ms = _enforce_thresholds(
         onset_threshold,
@@ -131,37 +283,60 @@ def transcribe_basic_pitch(
         minimum_note_length_ms,
     )
 
-    buf = io.StringIO()
-    with redirect_stdout(buf):
-        _, midi_data, raw_events = predict(
-            str(audio_path),
-            model_or_model_path=model,
-            onset_threshold=float(onset_threshold),
-            frame_threshold=float(frame_threshold),
-            minimum_note_length=float(minimum_note_length_ms),
-            melodia_trick=bool(melodia_trick),
-            midi_tempo=float(midi_tempo),
-        )
+    model_obj, model_path = _get_model()
+
+    from omnizart.music import app as music_app  # type: ignore
+
+    kwargs: dict[str, object] = {}
+    sig = inspect.signature(music_app.transcribe)
+    if model_path is not None and "model_path" in sig.parameters:
+        kwargs["model_path"] = model_path
+    if model_obj is not None and "model" in sig.parameters:
+        kwargs["model"] = model_obj
 
     events: list[NoteEvent] = []
-    for start_s, end_s, pitch, amplitude, _pitch_bend in raw_events:
-        if float(end_s) <= float(start_s):
-            continue
-        velocity = int(round(127 * float(amplitude)))
-        velocity = max(1, min(127, velocity))
-        events.append(
-            NoteEvent(
-                start_time_s=float(start_s),
-                end_time_s=float(end_s),
-                pitch_midi=int(pitch),
-                velocity=velocity,
-                amplitude=float(amplitude),
-            )
-        )
+    midi_data: object | None = None
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        if "output" in sig.parameters:
+            kwargs["output"] = str(tmp_dir)
+        result = music_app.transcribe(str(audio_path), **kwargs)
+
+        notes = _extract_notes(result)
+        if not notes:
+            midi_path = _find_midi_file(Path(tmp_dir))
+            if midi_path is not None:
+                midi_data, events = _notes_from_midi(midi_path)
+
+        if notes:
+            for note in notes:
+                if isinstance(note, (list, tuple)) and len(note) >= 3:
+                    start_s, end_s, pitch = note[:3]
+                    velocity = note[3] if len(note) > 3 else None
+                else:
+                    start_s, end_s, pitch, velocity = _note_fields(note)
+                if start_s is None or end_s is None or pitch is None:
+                    continue
+                if float(end_s) <= float(start_s):
+                    continue
+                vel, amp = _normalize_velocity(velocity)
+                events.append(
+                    NoteEvent(
+                        start_time_s=float(start_s),
+                        end_time_s=float(end_s),
+                        pitch_midi=int(pitch),
+                        velocity=int(vel),
+                        amplitude=float(amp),
+                    )
+                )
+
+    min_duration_s = float(minimum_note_length_ms) / 1000.0
+    if frame_threshold > 0:
+        min_velocity = max(int(min_velocity), int(round(float(frame_threshold) * 127.0)))
 
     events = _clean_note_events(
         events,
-        min_duration_s=float(minimum_note_length_ms) / 1000.0,
+        min_duration_s=float(min_duration_s),
         min_velocity=int(min_velocity),
         keep_melody=bool(keep_melody),
         melody_window_s=float(melody_window_s),

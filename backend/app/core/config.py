@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
 
     ENABLE_DEMUCS: bool = False
-    DEMUCS_MODEL: str = "htdemucs"
+    DEMUCS_MODEL: str = "htdemucs_ft"
     DEMUCS_DEVICE: str = "auto"  # auto|cpu|cuda
 
     ENABLE_BASIC_PITCH: bool = True

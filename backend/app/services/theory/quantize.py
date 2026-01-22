@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from typing import Literal
 
@@ -28,7 +27,6 @@ def estimate_key_signature_music21(note_events: list[NoteEvent]) -> KeySignature
     from music21 import note as m21note
     from music21 import stream as m21stream
 
-    # Use a sample of events to keep analysis fast and stable on long files.
     sampled = note_events[:: max(1, len(note_events) // 1500)]
 
     s = m21stream.Stream()
@@ -70,79 +68,162 @@ class QuantizeResult:
     score: ScoreData
     key_signature: KeySignature | None
     pickup_quarters: float = 0.0
+    score_m21: object | None = None
 
 
-def _choose_grid_q(onsets_q: np.ndarray) -> tuple[float, Literal["straight", "triplet"]]:
-    if onsets_q.size == 0:
-        return 0.5, "straight"
-
-    candidates: list[tuple[float, Literal["straight", "triplet"], float]] = [
-        (0.25, "straight", 1.15),  # 16th (penalize: often too noisy for AMT)
-        (0.5, "straight", 1.0),  # 8th
-        (1.0, "straight", 1.05),  # quarter (slight penalty: can oversimplify)
-        (1.0 / 3.0, "triplet", 1.25),  # 8th-triplet grid (penalize slightly)
-    ]
-
-    best = None
-    for grid, kind, penalty in candidates:
-        qn = np.round(onsets_q / grid) * grid
-        err = float(np.mean(np.abs(onsets_q - qn)))
-        cost = err * penalty
-        if best is None or cost < best[0] - 1e-6:
-            best = (cost, grid, kind)
-            continue
-        # If costs are effectively tied, prefer a coarser grid for readability.
-        if best is not None and abs(cost - best[0]) <= 1e-6 and grid > best[1]:
-            best = (cost, grid, kind)
-
-    assert best is not None
-    return float(best[1]), best[2]
+@dataclass(frozen=True)
+class _DurToken:
+    duration: str
+    dots: int
+    ql: float
+    tuplet: tuple[int, int] | None
 
 
-def _snap_note_events_to_grid(
+_DUR_TOKENS_STRAIGHT: list[_DurToken] = [
+    _DurToken("w", 0, 4.0, None),
+    _DurToken("h", 1, 3.0, None),
+    _DurToken("h", 0, 2.0, None),
+    _DurToken("q", 1, 1.5, None),
+    _DurToken("q", 0, 1.0, None),
+    _DurToken("8", 1, 0.75, None),
+    _DurToken("8", 0, 0.5, None),
+    _DurToken("16", 1, 0.375, None),
+    _DurToken("16", 0, 0.25, None),
+    _DurToken("32", 1, 0.1875, None),
+    _DurToken("32", 0, 0.125, None),
+]
+
+_DUR_TOKENS_TRIPLET: list[_DurToken] = [
+    _DurToken("w", 0, 4.0 * 2.0 / 3.0, (3, 2)),
+    _DurToken("h", 0, 2.0 * 2.0 / 3.0, (3, 2)),
+    _DurToken("q", 0, 1.0 * 2.0 / 3.0, (3, 2)),
+    _DurToken("8", 0, 0.5 * 2.0 / 3.0, (3, 2)),
+    _DurToken("16", 0, 0.25 * 2.0 / 3.0, (3, 2)),
+    _DurToken("32", 0, 0.125 * 2.0 / 3.0, (3, 2)),
+]
+
+_DUR_TOKENS_ALL: list[_DurToken] = sorted(
+    _DUR_TOKENS_STRAIGHT + _DUR_TOKENS_TRIPLET,
+    key=lambda t: (-t.ql, t.tuplet is not None),
+)
+
+
+def _decompose_duration(duration_q: float) -> list[_DurToken]:
+    out: list[_DurToken] = []
+    rem = float(duration_q)
+    eps = 1e-6
+
+    for token in _DUR_TOKENS_ALL:
+        while rem + eps >= token.ql:
+            out.append(token)
+            rem -= token.ql
+
+    if rem > 1e-3:
+        out.append(_DUR_TOKENS_ALL[-1])
+
+    return out
+
+
+def _parse_time_signature(time_signature: str) -> tuple[int, int]:
+    try:
+        num_s, den_s = (time_signature or "4/4").split("/")
+        num = int(num_s)
+        den = int(den_s)
+        if num <= 0 or den <= 0:
+            raise ValueError
+        return num, den
+    except Exception:
+        return 4, 4
+
+
+def _to_beats(times_s: np.ndarray, beat_times: np.ndarray) -> np.ndarray:
+    beats = np.asarray(beat_times, dtype=np.float64)
+    beats = beats[np.isfinite(beats)]
+    beats = np.sort(beats)
+    indices = np.arange(len(beats), dtype=np.float64)
+    avg_dur = float(np.mean(np.diff(beats))) if len(beats) > 1 else 0.5
+    if avg_dur <= 0:
+        avg_dur = 0.5
+    res = np.interp(times_s, beats, indices, left=-1.0, right=-1.0)
+
+    mask_l = times_s < beats[0]
+    if np.any(mask_l):
+        res[mask_l] = indices[0] - (beats[0] - times_s[mask_l]) / avg_dur
+
+    mask_r = times_s > beats[-1]
+    if np.any(mask_r):
+        res[mask_r] = indices[-1] + (times_s[mask_r] - beats[-1]) / avg_dur
+
+    return res
+
+
+def _warp_note_events(
     note_events: list[NoteEvent],
     *,
-    sec_per_q: float,
-    grid_q: float,
-) -> list[NoteEvent]:
-    step_s = float(sec_per_q) * float(grid_q)
-    if step_s <= 0:
-        return list(note_events)
+    tempo_bpm: float,
+    beat_times: np.ndarray | None,
+) -> tuple[list[NoteEvent], float, float]:
+    if not note_events:
+        return [], 0.0, 1.0
 
-    out: list[NoteEvent] = []
-    for ev in note_events:
-        if ev.end_time_s <= ev.start_time_s:
-            continue
-        s_step = int(round(float(ev.start_time_s) / step_s))
-        e_step = int(round(float(ev.end_time_s) / step_s))
-        if e_step <= s_step:
-            e_step = s_step + 1
-        start = float(s_step) * step_s
-        end = float(e_step) * step_s
-        out.append(
+    if beat_times is not None and len(beat_times) > 1:
+        starts = np.array([e.start_time_s for e in note_events], dtype=np.float64)
+        ends = np.array([e.end_time_s for e in note_events], dtype=np.float64)
+        new_starts = _to_beats(starts, beat_times)
+        new_ends = _to_beats(ends, beat_times)
+        warped = [
             NoteEvent(
-                start_time_s=start,
-                end_time_s=end,
+                start_time_s=float(new_starts[i]),
+                end_time_s=float(new_ends[i]),
                 pitch_midi=int(ev.pitch_midi),
                 velocity=int(ev.velocity),
                 amplitude=float(ev.amplitude),
             )
-        )
+            for i, ev in enumerate(note_events)
+        ]
+        sec_per_q = 1.0
+    else:
+        tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
+        sec_per_q = 60.0 / tempo
+        warped = [
+            NoteEvent(
+                start_time_s=float(ev.start_time_s) / sec_per_q,
+                end_time_s=float(ev.end_time_s) / sec_per_q,
+                pitch_midi=int(ev.pitch_midi),
+                velocity=int(ev.velocity),
+                amplitude=float(ev.amplitude),
+            )
+            for ev in note_events
+        ]
 
-    return sorted(out, key=lambda e: e.start_time_s)
+    min_start = min((ev.start_time_s for ev in warped), default=0.0)
+    pickup_quarters = max(0.0, -float(min_start))
+    if pickup_quarters > 0.0:
+        warped = [
+            NoteEvent(
+                start_time_s=float(ev.start_time_s) + pickup_quarters,
+                end_time_s=float(ev.end_time_s) + pickup_quarters,
+                pitch_midi=int(ev.pitch_midi),
+                velocity=int(ev.velocity),
+                amplitude=float(ev.amplitude),
+            )
+            for ev in warped
+        ]
+
+    return warped, pickup_quarters, float(sec_per_q)
 
 
 def _merge_nearby_note_events(
     note_events: list[NoteEvent],
     *,
-    gap_s: float,
+    gap_q: float,
 ) -> list[NoteEvent]:
     by_pitch: dict[int, list[NoteEvent]] = {}
     for ev in note_events:
         by_pitch.setdefault(int(ev.pitch_midi), []).append(ev)
 
     merged: list[NoteEvent] = []
-    gap_s = max(0.0, float(gap_s))
+    gap_q = max(0.0, float(gap_q))
     for pitch, events in by_pitch.items():
         events_sorted = sorted(events, key=lambda e: e.start_time_s)
         cur: NoteEvent | None = None
@@ -151,7 +232,7 @@ def _merge_nearby_note_events(
                 cur = ev
                 continue
             gap = float(ev.start_time_s) - float(cur.end_time_s)
-            if gap <= gap_s:
+            if gap <= gap_q:
                 end_time = max(float(cur.end_time_s), float(ev.end_time_s))
                 amp = max(float(cur.amplitude), float(ev.amplitude))
                 vel = max(int(cur.velocity), int(ev.velocity))
@@ -171,36 +252,55 @@ def _merge_nearby_note_events(
     return sorted(merged, key=lambda e: e.start_time_s)
 
 
-_DUR_TOKENS_STRAIGHT: list[tuple[str, int, float]] = [
-    ("w", 0, 4.0),
-    ("h", 1, 3.0),
-    ("h", 0, 2.0),
-    ("q", 1, 1.5),
-    ("q", 0, 1.0),
-    ("8", 1, 0.75),
-    ("8", 0, 0.5),
-    ("16", 1, 0.375),
-    ("16", 0, 0.25),
-    ("32", 1, 0.1875),
-    ("32", 0, 0.125),
-]
+def _chordified_sequence(part: object) -> list[tuple[list[int], float]]:
+    from music21 import chord as m21chord
+    from music21 import note as m21note
 
+    chordified = part.chordify()  # type: ignore[attr-defined]
+    elements = list(chordified.recurse().notesAndRests)
+    events: list[tuple[float, float, list[int]]] = []
+    for el in elements:
+        offset = float(getattr(el, "offset", 0.0))
+        ql = float(getattr(el.duration, "quarterLength", 0.0))
+        if ql <= 1e-6:
+            continue
+        if isinstance(el, m21note.Rest):
+            pitches: list[int] = []
+        elif isinstance(el, m21chord.Chord):
+            pitches = [int(p.midi) for p in el.pitches]
+        elif isinstance(el, m21note.Note):
+            pitches = [int(el.pitch.midi)]
+        else:
+            continue
+        events.append((offset, ql, pitches))
 
-def _decompose_duration_straight(duration_q: float) -> list[tuple[str, int, float]]:
-    out: list[tuple[str, int, float]] = []
-    rem = float(duration_q)
+    events.sort(key=lambda e: e[0])
+    seq: list[tuple[list[int], float]] = []
     eps = 1e-6
+    cur = 0.0
+    for offset, ql, pitches in events:
+        if offset > cur + eps:
+            seq.append(([], float(offset - cur)))
+            cur = offset
+        if offset < cur - eps:
+            overlap = cur - offset
+            if ql <= overlap + eps:
+                continue
+            ql = float(ql - overlap)
+            offset = cur
+        seq.append((pitches, float(ql)))
+        cur = offset + ql
 
-    for dur, dots, ql in _DUR_TOKENS_STRAIGHT:
-        while rem + eps >= ql:
-            out.append((dur, dots, ql))
-            rem -= ql
+    merged: list[tuple[list[int], float]] = []
+    for pitches, ql in seq:
+        if ql <= 1e-6:
+            continue
+        if merged and merged[-1][0] == pitches:
+            merged[-1] = (pitches, merged[-1][1] + ql)
+        else:
+            merged.append((pitches, ql))
 
-    if rem > 1e-3:
-        # Fallback: force a 32nd to avoid dropping time.
-        out.append(("32", 0, max(0.125, rem)))
-
-    return out
+    return merged
 
 
 def quantize_note_events_to_score(
@@ -213,224 +313,149 @@ def quantize_note_events_to_score(
     snap_to_grid: bool = True,
     merge_gap_s: float = 0.02,
 ) -> QuantizeResult:
-    # 1. Determine "tempo" for grid calculations.
-    # If beat_times are provided, we warp everything to a 60 BPM domain (1 sec = 1 beat).
-    # Otherwise we use the constant tempo_bpm.
-    if beat_times is not None and len(beat_times) > 1:
-        # Warp events to beat domain
-        beats = np.array(beat_times, dtype=np.float64)
-        indices = np.arange(len(beats), dtype=np.float64)
-
-        # Average beat duration for extrapolation
-        avg_dur = float(np.mean(np.diff(beats)))
-        if avg_dur <= 0:
-            avg_dur = 0.5
-
-        def to_beats(t_arr: np.ndarray) -> np.ndarray:
-            # Linear interpolation with extrapolation
-            res = np.interp(t_arr, beats, indices, left=-1.0, right=-1.0)
-
-            # Fix left (before first beat)
-            mask_l = t_arr < beats[0]
-            if np.any(mask_l):
-                res[mask_l] = indices[0] - (beats[0] - t_arr[mask_l]) / avg_dur
-
-            # Fix right (after last beat)
-            mask_r = t_arr > beats[-1]
-            if np.any(mask_r):
-                res[mask_r] = indices[-1] + (t_arr[mask_r] - beats[-1]) / avg_dur
-            return res
-
-        start_times = np.array([e.start_time_s for e in note_events])
-        end_times = np.array([e.end_time_s for e in note_events])
-
-        new_starts = to_beats(start_times)
-        new_ends = to_beats(end_times)
-
-        warped_events = []
-        for i, ev in enumerate(note_events):
-            warped_events.append(NoteEvent(
-                start_time_s=float(new_starts[i]),
-                end_time_s=float(new_ends[i]),
-                pitch_midi=ev.pitch_midi,
-                velocity=ev.velocity,
-                amplitude=ev.amplitude
-            ))
-        note_events = warped_events
-
-        # In beat domain, 1.0 "seconds" = 1 beat (quarter note)
-        sec_per_q = 1.0
-        # Effectively 60 BPM
-    else:
-        tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
-        sec_per_q = 60.0 / tempo
-
-    # Convert onsets to quarter units for grid selection.
-    onsets_q = np.asarray([ev.start_time_s / sec_per_q for ev in note_events], dtype=np.float32)
-    grid_q, grid_kind = _choose_grid_q(onsets_q)
-    min_grid_q = float(min_grid_q)
-    if min_grid_q > 0:
-        grid_q = max(float(grid_q), min_grid_q)
-
-    if snap_to_grid:
-        note_events = _snap_note_events_to_grid(note_events, sec_per_q=sec_per_q, grid_q=grid_q)
-        # Gap for merge also needs to be in beat domain if we warped
-        # But merge_gap_s is typically small (0.02s).
-        # In beat domain (60BPM), 0.02s is 0.02 beats.
-        # If original tempo was 120, 0.02s is 0.04 beats.
-        # It scales roughly correctly if we treat gap_s as "units".
-        # Let's just use it as is, or scale it?
-        # Usually gap_s is for "humanization" removal. 0.02 units (beats) is fine (~1/50 beat).
-        note_events = _merge_nearby_note_events(note_events, gap_s=merge_gap_s)
-
-    # Key detection (music21).
     key_sig = estimate_key_signature_music21(note_events)
     use_flats = bool(key_sig.use_flats) if key_sig else False
 
-    # Time signature parsing (default to 4/4).
-    try:
-        num_s, den_s = (time_signature or "4/4").split("/")
-        num = int(num_s)
-        den = int(den_s)
-    except Exception:
-        num, den = 4, 4
+    warped_events, pickup_quarters, sec_per_q = _warp_note_events(
+        note_events,
+        tempo_bpm=float(tempo_bpm),
+        beat_times=beat_times,
+    )
 
-    measure_q = float(num) * (4.0 / float(den))
-    steps_per_measure = int(round(measure_q / grid_q))
-    if steps_per_measure <= 0:
-        steps_per_measure = 16
+    if not warped_events:
+        num, den = _parse_time_signature(time_signature)
+        measure_q = float(num) * (4.0 / float(den))
+        items = []
+        for token in _decompose_duration(measure_q):
+            items.append(ScoreItem(rest=True, keys=[], duration=token.duration, dots=token.dots))
+        empty = ScoreMeasure(number=1, items=items)
+        score = ScoreData(grid_q=1.0, grid_kind="straight", measures=[empty])
+        return QuantizeResult(score=score, key_signature=key_sig, pickup_quarters=0.0, score_m21=None)
 
-    # Build boundary maps (step -> pitches starting/ending at that step).
-    starts: dict[int, list[int]] = defaultdict(list)
-    ends: dict[int, list[int]] = defaultdict(list)
-    last_step = 0
-    min_step = 0
+    gap_q = float(merge_gap_s)
+    if beat_times is None or len(beat_times) <= 1:
+        gap_q = float(merge_gap_s) / float(sec_per_q if sec_per_q > 0 else 1.0)
+    warped_events = _merge_nearby_note_events(warped_events, gap_q=gap_q)
 
-    for ev in note_events:
+    from music21 import meter as m21meter
+    from music21 import note as m21note
+    from music21 import stream as m21stream
+
+    part = m21stream.Part()
+    part.insert(0, m21meter.TimeSignature(time_signature))
+
+    for ev in warped_events:
         if ev.end_time_s <= ev.start_time_s:
             continue
-        s_q = float(ev.start_time_s) / sec_per_q
-        e_q = float(ev.end_time_s) / sec_per_q
-
-        s = int(round(s_q / grid_q))
-        e = int(round(e_q / grid_q))
-        if e <= s:
-            e = s + 1
-
-        pitch = int(ev.pitch_midi)
-        starts[s].append(pitch)
-        ends[e].append(pitch)
-        last_step = max(last_step, e)
-        # Note: we might have negative steps if notes started before first beat
-        min_step = min(min_step, s)
-
-    # Sweep steps into compressed chord/rest events.
-    # If min_step < 0 we keep those steps to support pickup/anacrusa.
-
-    active: dict[int, int] = {}
-    events: list[tuple[list[int], int]] = []  # (pitches, duration_steps)
-    prev_pitches: list[int] | None = None
-    prev_len = 0
-
-    for step in range(min_step, last_step):
-        for p in ends.get(step, []):
-            active[p] = active.get(p, 0) - 1
-            if active[p] <= 0:
-                active.pop(p, None)
-        for p in starts.get(step, []):
-            active[p] = active.get(p, 0) + 1
-
-        cur = sorted(active.keys())
-        if prev_pitches is None:
-            prev_pitches = cur
-            prev_len = 1
+        dur = float(ev.end_time_s) - float(ev.start_time_s)
+        if dur <= 0:
             continue
+        n = m21note.Note(int(ev.pitch_midi))
+        n.duration.quarterLength = dur
+        part.insert(float(ev.start_time_s), n)
 
-        if cur == prev_pitches:
-            prev_len += 1
-        else:
-            events.append((prev_pitches, prev_len))
-            prev_pitches = cur
-            prev_len = 1
+    if snap_to_grid:
+        part.quantize(
+            quarterLengthDivisors=(4, 3),
+            processOffsets=True,
+            processDurations=True,
+            inPlace=True,
+        )
+        try:
+            part.makeNotation(inPlace=True)
+        except Exception:
+            pass
 
-    if prev_pitches is None:
-        events = [([], int(steps_per_measure))]
-    else:
-        events.append((prev_pitches, prev_len))
+    events_seq = _chordified_sequence(part)
 
-    # Split events into measures and emit ScoreData.
+    num, den = _parse_time_signature(time_signature)
+    measure_q = float(num) * (4.0 / float(den))
+    pickup_quarters = float(pickup_quarters or 0.0)
+    remaining_q = pickup_quarters if pickup_quarters > 1e-6 else measure_q
+
     measures: list[ScoreMeasure] = []
-    current_measure_items: list[ScoreItem] = []
+    current_items: list[ScoreItem] = []
     measure_number = 1
-    pickup_steps = max(0, int(-min_step))
-    # If pickup spans multiple full measures, keep only the remainder to avoid
-    # overlong measures (rare; usually indicates a noisy beat track).
-    if pickup_steps >= steps_per_measure:
-        pickup_steps = int(pickup_steps % steps_per_measure)
-    remaining_steps = pickup_steps if pickup_steps > 0 else steps_per_measure
-    pickup_quarters = float(pickup_steps) * float(grid_q)
+    min_token_q = None
+    has_tuplet = False
+    has_straight = False
 
-    def flush_measure():
-        nonlocal current_measure_items, measure_number
-        measures.append(ScoreMeasure(number=measure_number, items=current_measure_items))
-        current_measure_items = []
+    def flush_measure() -> None:
+        nonlocal current_items, measure_number
+        measures.append(ScoreMeasure(number=measure_number, items=current_items))
+        current_items = []
         measure_number += 1
 
-    def emit_item(pitches: list[int], duration: str, dots: int, tuplet: TupletSpec | None, tie: str | None):
-        keys = [_midi_to_vexflow_key(p, use_flats=use_flats) for p in pitches] if pitches else []
-        current_measure_items.append(
+    def emit_item(
+        pitches: list[int],
+        token: _DurToken,
+        tie: str | None,
+    ) -> None:
+        nonlocal min_token_q, has_tuplet, has_straight
+        keys = [_midi_to_vexflow_key(p, use_flats=use_flats) for p in sorted(set(pitches))] if pitches else []
+        tuplet_spec = None
+        if token.tuplet is not None:
+            tuplet_spec = TupletSpec(num_notes=int(token.tuplet[0]), notes_occupied=int(token.tuplet[1]))
+            has_tuplet = True
+        else:
+            has_straight = True
+        current_items.append(
             ScoreItem(
-                rest=(len(pitches) == 0),
+                rest=(len(keys) == 0),
                 keys=keys,
-                duration=duration,
-                dots=dots,
-                tuplet=tuplet,
+                duration=token.duration,
+                dots=int(token.dots),
+                tuplet=tuplet_spec,
                 tie=tie,  # type: ignore[arg-type]
             )
         )
+        min_token_q = token.ql if min_token_q is None else min(min_token_q, token.ql)
 
-    for pitches, dur_steps in events:
-        steps_left = int(dur_steps)
-        while steps_left > 0:
-            take = min(steps_left, remaining_steps)
+    for pitches, dur_q in events_seq:
+        remaining_event = float(dur_q)
+        if remaining_event <= 1e-6:
+            continue
+        is_pitched = len(pitches) > 0
+        event_started = False
 
-            dur_q = take * grid_q
-            if grid_kind == "triplet":
-                # Represent as 8th-notes in 3:2 tuplets (each = 1/3 quarter).
-                unit_steps = int(take)
-                tuplet = TupletSpec(num_notes=3, notes_occupied=2)
-                for i in range(unit_steps):
-                    tie = None
-                    if unit_steps > 1:
-                        if i == 0:
-                            tie = "start"
-                        elif i == unit_steps - 1:
-                            tie = "stop"
-                        else:
-                            tie = "continue"
-                    emit_item(pitches, duration="8", dots=0, tuplet=tuplet, tie=tie)
-            else:
-                parts = _decompose_duration_straight(dur_q)
-                for i, (dur, dots, _ql) in enumerate(parts):
-                    tie = None
-                    if len(parts) > 1:
-                        if i == 0:
-                            tie = "start"
-                        elif i == len(parts) - 1:
-                            tie = "stop"
-                        else:
-                            tie = "continue"
-                    emit_item(pitches, duration=dur, dots=dots, tuplet=None, tie=tie)
+        while remaining_event > 1e-6:
+            take = min(remaining_event, remaining_q)
+            tokens = _decompose_duration(take)
+            for idx, token in enumerate(tokens):
+                is_first = (not event_started) and (idx == 0)
+                is_last = (remaining_event - take <= 1e-6) and (idx == len(tokens) - 1)
+                tie = None
+                if is_pitched and not (is_first and is_last):
+                    if is_first:
+                        tie = "start"
+                    elif is_last:
+                        tie = "stop"
+                    else:
+                        tie = "continue"
+                emit_item(pitches, token, tie)
+                event_started = True
 
-            steps_left -= take
-            remaining_steps -= take
-
-            if remaining_steps <= 0:
+            remaining_event -= take
+            remaining_q -= take
+            if remaining_q <= 1e-6:
                 flush_measure()
-                remaining_steps = steps_per_measure
+                remaining_q = measure_q
 
-    if current_measure_items:
+    if current_items:
         flush_measure()
 
+    grid_q = float(min_token_q if min_token_q is not None else 1.0)
+    if min_grid_q and min_grid_q > 0:
+        grid_q = max(grid_q, float(min_grid_q))
+    grid_kind: Literal["straight", "triplet"] = "triplet" if has_tuplet and not has_straight else "straight"
+
     score = ScoreData(grid_q=float(grid_q), grid_kind=grid_kind, measures=measures)
-    return QuantizeResult(score=score, key_signature=key_sig, pickup_quarters=pickup_quarters)
+    score_m21 = m21stream.Score()
+    score_m21.insert(0, part)
+
+    return QuantizeResult(
+        score=score,
+        key_signature=key_sig,
+        pickup_quarters=float(pickup_quarters),
+        score_m21=score_m21,
+    )
