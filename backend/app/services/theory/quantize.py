@@ -92,6 +92,78 @@ def _choose_grid_q(onsets_q: np.ndarray) -> tuple[float, Literal["straight", "tr
     return float(best[1]), best[2]
 
 
+def _snap_note_events_to_grid(
+    note_events: list[NoteEvent],
+    *,
+    sec_per_q: float,
+    grid_q: float,
+) -> list[NoteEvent]:
+    step_s = float(sec_per_q) * float(grid_q)
+    if step_s <= 0:
+        return list(note_events)
+
+    out: list[NoteEvent] = []
+    for ev in note_events:
+        if ev.end_time_s <= ev.start_time_s:
+            continue
+        s_step = int(round(float(ev.start_time_s) / step_s))
+        e_step = int(round(float(ev.end_time_s) / step_s))
+        if e_step <= s_step:
+            e_step = s_step + 1
+        start = float(s_step) * step_s
+        end = float(e_step) * step_s
+        out.append(
+            NoteEvent(
+                start_time_s=start,
+                end_time_s=end,
+                pitch_midi=int(ev.pitch_midi),
+                velocity=int(ev.velocity),
+                amplitude=float(ev.amplitude),
+            )
+        )
+
+    return sorted(out, key=lambda e: e.start_time_s)
+
+
+def _merge_nearby_note_events(
+    note_events: list[NoteEvent],
+    *,
+    gap_s: float,
+) -> list[NoteEvent]:
+    by_pitch: dict[int, list[NoteEvent]] = {}
+    for ev in note_events:
+        by_pitch.setdefault(int(ev.pitch_midi), []).append(ev)
+
+    merged: list[NoteEvent] = []
+    gap_s = max(0.0, float(gap_s))
+    for pitch, events in by_pitch.items():
+        events_sorted = sorted(events, key=lambda e: e.start_time_s)
+        cur: NoteEvent | None = None
+        for ev in events_sorted:
+            if cur is None:
+                cur = ev
+                continue
+            gap = float(ev.start_time_s) - float(cur.end_time_s)
+            if gap <= gap_s:
+                end_time = max(float(cur.end_time_s), float(ev.end_time_s))
+                amp = max(float(cur.amplitude), float(ev.amplitude))
+                vel = max(int(cur.velocity), int(ev.velocity))
+                cur = NoteEvent(
+                    start_time_s=float(cur.start_time_s),
+                    end_time_s=float(end_time),
+                    pitch_midi=int(pitch),
+                    velocity=int(vel),
+                    amplitude=float(amp),
+                )
+            else:
+                merged.append(cur)
+                cur = ev
+        if cur is not None:
+            merged.append(cur)
+
+    return sorted(merged, key=lambda e: e.start_time_s)
+
+
 _DUR_TOKENS_STRAIGHT: list[tuple[str, int, float]] = [
     ("w", 0, 4.0),
     ("h", 1, 3.0),
@@ -129,17 +201,27 @@ def quantize_note_events_to_score(
     *,
     tempo_bpm: float,
     time_signature: str = "4/4",
+    min_grid_q: float = 0.25,
+    snap_to_grid: bool = True,
+    merge_gap_s: float = 0.02,
 ) -> QuantizeResult:
     tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
     sec_per_q = 60.0 / tempo
 
-    # Key detection (music21).
-    key_sig = estimate_key_signature_music21(note_events)
-    use_flats = bool(key_sig.use_flats) if key_sig else False
-
     # Convert onsets to quarter units for grid selection.
     onsets_q = np.asarray([ev.start_time_s / sec_per_q for ev in note_events], dtype=np.float32)
     grid_q, grid_kind = _choose_grid_q(onsets_q)
+    min_grid_q = float(min_grid_q)
+    if min_grid_q > 0:
+        grid_q = max(float(grid_q), min_grid_q)
+
+    if snap_to_grid:
+        note_events = _snap_note_events_to_grid(note_events, sec_per_q=sec_per_q, grid_q=grid_q)
+        note_events = _merge_nearby_note_events(note_events, gap_s=merge_gap_s)
+
+    # Key detection (music21).
+    key_sig = estimate_key_signature_music21(note_events)
+    use_flats = bool(key_sig.use_flats) if key_sig else False
 
     # Time signature parsing (default to 4/4).
     try:
@@ -277,4 +359,3 @@ def quantize_note_events_to_score(
 
     score = ScoreData(grid_q=float(grid_q), grid_kind=grid_kind, measures=measures)
     return QuantizeResult(score=score, key_signature=key_sig)
-

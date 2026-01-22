@@ -31,14 +31,85 @@ def _get_model():
     return _MODEL
 
 
+def _enforce_thresholds(
+    onset_threshold: float,
+    frame_threshold: float,
+    minimum_note_length_ms: float,
+) -> tuple[float, float, float]:
+    onset = max(0.6, float(onset_threshold))
+    frame = max(0.4, float(frame_threshold))
+    min_len_ms = max(60.0, float(minimum_note_length_ms))
+    return onset, frame, min_len_ms
+
+
+def _melody_anchor_pitches(
+    note_events: list[NoteEvent],
+    *,
+    window_s: float,
+) -> dict[int, int]:
+    window = max(0.01, float(window_s))
+    anchors: dict[int, int] = {}
+    for ev in note_events:
+        mid = 0.5 * (float(ev.start_time_s) + float(ev.end_time_s))
+        bucket = int(mid / window)
+        pitch = int(ev.pitch_midi)
+        prev = anchors.get(bucket)
+        if prev is None or pitch > prev:
+            anchors[bucket] = pitch
+    return anchors
+
+
+def _clean_note_events(
+    note_events: list[NoteEvent],
+    *,
+    min_duration_s: float,
+    min_velocity: int,
+    keep_melody: bool,
+    melody_window_s: float,
+) -> list[NoteEvent]:
+    if not note_events:
+        return []
+
+    min_duration_s = max(0.0, float(min_duration_s))
+    min_velocity = int(min_velocity)
+    keep_melody = bool(keep_melody)
+    melody_window_s = max(0.01, float(melody_window_s))
+
+    anchors = _melody_anchor_pitches(note_events, window_s=melody_window_s) if keep_melody else {}
+    out: list[NoteEvent] = []
+    for ev in note_events:
+        start = float(ev.start_time_s)
+        end = float(ev.end_time_s)
+        if end <= start:
+            continue
+        if (end - start) < min_duration_s:
+            continue
+
+        velocity = int(ev.velocity)
+        if velocity < min_velocity:
+            if not keep_melody:
+                continue
+            mid = 0.5 * (start + end)
+            bucket = int(mid / melody_window_s)
+            if anchors.get(bucket) != int(ev.pitch_midi):
+                continue
+
+        out.append(ev)
+
+    return sorted(out, key=lambda e: e.start_time_s)
+
+
 def transcribe_basic_pitch(
     audio_path: Path,
     *,
     midi_tempo: float,
-    onset_threshold: float = 0.5,
-    frame_threshold: float = 0.3,
-    minimum_note_length_ms: float = 127.70,
+    onset_threshold: float = 0.6,
+    frame_threshold: float = 0.4,
+    minimum_note_length_ms: float = 60.0,
     melodia_trick: bool = True,
+    min_velocity: int = 30,
+    keep_melody: bool = True,
+    melody_window_s: float = 0.08,
 ) -> tuple[object, list[NoteEvent]]:
     """
     Run Spotify Basic Pitch on an audio file.
@@ -52,6 +123,12 @@ def transcribe_basic_pitch(
     # basic_pitch.predict prints to stdout; avoid polluting worker logs.
     import io
     from contextlib import redirect_stdout
+
+    onset_threshold, frame_threshold, minimum_note_length_ms = _enforce_thresholds(
+        onset_threshold,
+        frame_threshold,
+        minimum_note_length_ms,
+    )
 
     buf = io.StringIO()
     with redirect_stdout(buf):
@@ -67,15 +144,27 @@ def transcribe_basic_pitch(
 
     events: list[NoteEvent] = []
     for start_s, end_s, pitch, amplitude, _pitch_bend in raw_events:
+        if float(end_s) <= float(start_s):
+            continue
+        velocity = int(round(127 * float(amplitude)))
+        velocity = max(1, min(127, velocity))
         events.append(
             NoteEvent(
                 start_time_s=float(start_s),
                 end_time_s=float(end_s),
                 pitch_midi=int(pitch),
-                velocity=int(round(127 * float(amplitude))),
+                velocity=velocity,
                 amplitude=float(amplitude),
             )
         )
+
+    events = _clean_note_events(
+        events,
+        min_duration_s=float(minimum_note_length_ms) / 1000.0,
+        min_velocity=int(min_velocity),
+        keep_melody=bool(keep_melody),
+        melody_window_s=float(melody_window_s),
+    )
 
     return midi_data, events
 
@@ -123,4 +212,3 @@ def chroma_from_note_events(
     chroma /= (np.linalg.norm(chroma, axis=0, keepdims=True) + 1e-9)
     times = (np.arange(frames, dtype=np.float32) * hop).astype(np.float32)
     return chroma, times
-
