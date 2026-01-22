@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import Literal, Optional
 
 import numpy as np
+from madmom.features.key import CNNKeyRecognitionProcessor, key_prediction_to_label
 
 Mode = Literal["major", "minor"]
 
@@ -51,21 +54,6 @@ class KeyEstimate:
         return asdict(self)
 
 
-_KRUMHANSL_MAJOR = np.asarray(
-    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88],
-    dtype=np.float32,
-)
-_KRUMHANSL_MINOR = np.asarray(
-    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17],
-    dtype=np.float32,
-)
-
-
-def _unit(v: np.ndarray) -> np.ndarray:
-    v = np.asarray(v, dtype=np.float32)
-    return v / (float(np.linalg.norm(v)) + 1e-9)
-
-
 def _key_name_and_fifths(pc: int, mode: Mode) -> tuple[str, int]:
     pc = int(pc) % 12
 
@@ -102,52 +90,80 @@ def _key_name_and_fifths(pc: int, mode: Mode) -> tuple[str, int]:
         }
 
     opts = variants.get(pc, [(NOTE_NAMES_SHARP[pc], 0)])
-    # prefer fewer accidentals; if tie, prefer flats (more common enharmonics)
+    # Prefer fewer accidentals; if tie, prefer flats (more common enharmonics).
     tonic, fifths = sorted(opts, key=lambda it: (abs(it[1]), 0 if it[1] < 0 else 1))[0]
     return tonic, int(fifths)
 
 
-def estimate_key_from_chroma(chroma: np.ndarray) -> Optional[KeyEstimate]:
+@lru_cache(maxsize=1)
+def _get_key_processor() -> CNNKeyRecognitionProcessor:
+    return CNNKeyRecognitionProcessor()
+
+
+def _normalize_tonic(tonic: str) -> str:
+    tonic = str(tonic or "").strip()
+    if not tonic:
+        return tonic
+    tonic = tonic.replace("♯", "#").replace("♭", "b")
+    return tonic[0].upper() + tonic[1:]
+
+
+def _parse_key_label(label: str) -> Optional[tuple[str, Mode]]:
+    label = str(label or "").strip()
+    if not label:
+        return None
+
+    if ":" in label:
+        tonic, mode = label.split(":", 1)
+        mode = mode.strip().lower()
+        if mode in ("major", "minor", "maj", "min"):
+            mode = "major" if mode in ("major", "maj") else "minor"
+            return _normalize_tonic(tonic), mode
+
+    tokens = label.replace("maj", "major").replace("min", "minor").split()
+    if len(tokens) >= 2:
+        tonic = _normalize_tonic(tokens[0])
+        mode = tokens[1].lower()
+        if mode in ("major", "minor"):
+            return tonic, mode
+
+    return None
+
+
+def estimate_key_madmom(file_path: Path | str) -> Optional[KeyEstimate]:
     """
-    Krumhansl-Schmuckler style key estimation from a chroma matrix [12, frames].
-
-    Returns None if chroma is empty/invalid.
+    Estimate the global key with Madmom CNN. Returns None if inference fails.
     """
-    if chroma is None:
-        return None
-    chroma = np.asarray(chroma, dtype=np.float32)
-    if chroma.ndim != 2 or chroma.shape[0] != 12 or chroma.shape[1] < 1:
+    path = Path(file_path)
+    if not path.exists():
         return None
 
-    profile = chroma.mean(axis=1)
-    if not np.isfinite(profile).all() or float(np.sum(profile)) <= 1e-9:
+    try:
+        processor = _get_key_processor()
+        probs = processor(str(path))
+    except Exception:
         return None
 
-    profile_u = _unit(profile)
-    major_u = _unit(_KRUMHANSL_MAJOR)
-    minor_u = _unit(_KRUMHANSL_MINOR)
+    probs = np.asarray(probs, dtype=np.float32)
+    if probs.ndim > 1:
+        probs = np.mean(probs, axis=0)
+    if probs.size < 1 or not np.isfinite(probs).all():
+        return None
 
-    major_scores = np.asarray([float(np.dot(profile_u, np.roll(major_u, k))) for k in range(12)], dtype=np.float32)
-    minor_scores = np.asarray([float(np.dot(profile_u, np.roll(minor_u, k))) for k in range(12)], dtype=np.float32)
-
-    major_k = int(np.argmax(major_scores))
-    minor_k = int(np.argmax(minor_scores))
-    major_best = float(major_scores[major_k])
-    minor_best = float(minor_scores[minor_k])
-
-    if major_best >= minor_best:
-        tonic_pc = major_k
-        mode: Mode = "major"
-        score = major_best
-    else:
-        tonic_pc = minor_k
-        mode = "minor"
-        score = minor_best
+    label = key_prediction_to_label(probs)
+    parsed = _parse_key_label(label)
+    if parsed is None:
+        return None
+    tonic_raw, mode = parsed
+    tonic_pc = NOTE_TO_PC.get(tonic_raw)
+    if tonic_pc is None:
+        return None
 
     tonic, fifths = _key_name_and_fifths(tonic_pc, mode)
     use_flats = fifths < 0
     vexflow = f"{tonic}{'m' if mode == 'minor' else ''}"
     name = f"{tonic} {'minor' if mode == 'minor' else 'major'}"
+    score = float(np.max(probs)) if probs.size else 0.0
 
     return KeyEstimate(
         tonic_pc=int(tonic_pc),
@@ -178,7 +194,7 @@ def spell_chord_label(label: str, use_flats: bool) -> str:
     root = root.strip()
     pc = NOTE_TO_PC.get(root)
     if pc is None:
-        # normalize some common odd encodings and try again
+        # Normalize some common odd encodings and try again.
         root2 = root.replace("♯", "#").replace("♭", "b")
         pc = NOTE_TO_PC.get(root2)
     if pc is None:
@@ -186,4 +202,3 @@ def spell_chord_label(label: str, use_flats: bool) -> str:
 
     spelled = NOTE_NAMES_FLAT[int(pc)] if use_flats else NOTE_NAMES_SHARP[int(pc)]
     return f"{spelled}:{qual}" if qual else spelled
-

@@ -17,7 +17,7 @@ from app.services.chords.extract import extract_chords_template
 from app.services.grid.beats import estimate_beats_librosa, normalize_beat_times
 from app.services.engraving.lilypond import build_lilypond_score, render_lilypond_pdf
 from app.services.musicxml.lead_sheet import export_lead_sheet_musicxml
-from app.services.theory.key import estimate_key_from_chroma, spell_chord_label, NOTE_TO_PC
+from app.services.theory.key import estimate_key_madmom, spell_chord_label, NOTE_TO_PC
 
 # Transcription & Export Imports
 from app.services.amt.basic_pitch import transcribe_basic_pitch, NoteEvent, save_note_events_csv
@@ -1020,7 +1020,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         beat_times=beat_times_sel,
     )
 
-    key_est = estimate_key_from_chroma(chroma)
+    key_est = estimate_key_madmom(harmonic_path)
     key_sig = None
     if key_est is not None:
         key_sig = KeySignature(
