@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     BASIC_PITCH_MIN_NOTE_MS: float = 127.70
     BASIC_PITCH_HOP_SEC: float = 0.05
 
-    CHORD_VOCAB: str = "majmin7"  # majmin|majmin7
+    CHORD_VOCAB: str = "majmin7plus"  # majmin|majmin7|majmin7plus
     SWITCH_PENALTY: float = 2.5
     MIN_SEGMENT_SEC: float = 0.25
 

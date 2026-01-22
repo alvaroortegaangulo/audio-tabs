@@ -51,13 +51,13 @@ def detect_chords(y, sr) -> list[Segment]:
     Runs the Viterbi-based chord detection pipeline.
     """
     # 1. Compute Chroma
-    chroma = chroma_features(y, sr)
+    chroma, harm_rms = chroma_features(y, sr)
 
     # 2. Build Library (Maj/Min/7)
     labels, T = build_chord_library(vocab="majmin7")
 
     # 3. Compute Probabilities
-    probs = emission_probs(chroma, labels, T)
+    probs = emission_probs(chroma, harm_rms, labels, T)
 
     # 4. Viterbi Decode
     # switch_penalty tunes how often chords change.
@@ -304,6 +304,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         vocab=str(settings.CHORD_VOCAB),
         switch_penalty=float(settings.SWITCH_PENALTY),
         min_segment_sec=float(settings.MIN_SEGMENT_SEC),
+        beat_times=_beat_times,
     )
 
     key_est = estimate_key_from_chroma(chroma)

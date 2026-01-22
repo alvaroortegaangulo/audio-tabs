@@ -4,7 +4,9 @@ import librosa
 from dataclasses import dataclass
 from typing import List, Tuple
 
-NOTE_NAMES = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"]
+NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+NON_CHORD_TONE_PENALTY = 0.35
+
 
 @dataclass
 class Segment:
@@ -13,32 +15,43 @@ class Segment:
     label: str
     confidence: float
 
-def _templates(vocab: str) -> List[Tuple[str, np.ndarray]]:
+
+def _templates(vocab: str, *, alpha: float = NON_CHORD_TONE_PENALTY) -> List[Tuple[str, np.ndarray]]:
     """
-    Devuelve pares (suffix, template_12).
+    Return pairs (suffix, template_12).
     """
-    # intervalos en semitonos desde la raíz
+    # intervals in semitones from the root
     if vocab == "majmin":
         types = {
-            "maj": [0,4,7],
-            "min": [0,3,7],
+            "maj": [0, 4, 7],
+            "min": [0, 3, 7],
         }
-    else:  # majmin7
+    elif vocab in ("majmin7", "majmin7plus"):
         types = {
-            "maj": [0,4,7],
-            "min": [0,3,7],
-            "7":   [0,4,7,10],
-            "min7": [0,3,7,10],
+            "maj": [0, 4, 7],
+            "min": [0, 3, 7],
+            "7": [0, 4, 7, 10],
+            "min7": [0, 3, 7, 10],
+            "maj7": [0, 4, 7, 11],
+        }
+    else:
+        types = {
+            "maj": [0, 4, 7],
+            "min": [0, 3, 7],
+            "7": [0, 4, 7, 10],
+            "min7": [0, 3, 7, 10],
+            "maj7": [0, 4, 7, 11],
         }
 
     out = []
     for tname, ints in types.items():
-        v = np.zeros(12, dtype=np.float32)
+        v = np.full(12, -float(alpha), dtype=np.float32)
         for i in ints:
             v[i % 12] = 1.0
         v /= (np.linalg.norm(v) + 1e-9)
         out.append((tname, v))
     return out
+
 
 def build_chord_library(vocab: str) -> Tuple[List[str], np.ndarray]:
     """
@@ -57,70 +70,100 @@ def build_chord_library(vocab: str) -> Tuple[List[str], np.ndarray]:
             rows.append(tpl.astype(np.float32))
 
     T = np.stack(rows, axis=0)
-    # normaliza por si acaso
+    # normalize just in case
     T = T / (np.linalg.norm(T, axis=1, keepdims=True) + 1e-9)
     return labels, T
 
-def chroma_features(y: np.ndarray, sr: int, hop_length: int = 512) -> np.ndarray:
+
+def chroma_features(y: np.ndarray, sr: int, hop_length: int = 512) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Cromagrama robusto (CQT) + normalización frame-wise.
+    Returns:
+      chroma_norm: [12, frames] normalized for template matching
+      harm_rms: [frames] harmonic energy for the N state
     """
     y_h = librosa.effects.harmonic(y)
-    chroma = librosa.feature.chroma_cqt(y=y_h, sr=sr, hop_length=hop_length)
-    chroma = chroma.astype(np.float32)
-    chroma /= (np.linalg.norm(chroma, axis=0, keepdims=True) + 1e-9)
-    return chroma  # [12, frames]
+    harm_rms = librosa.feature.rms(y=y_h, frame_length=2048, hop_length=hop_length)[0].astype(np.float32)
+    harm_rms /= (np.max(harm_rms) + 1e-9)
 
-def emission_probs(chroma: np.ndarray, labels: List[str], T: np.ndarray) -> np.ndarray:
+    chroma_raw = librosa.feature.chroma_cqt(y=y_h, sr=sr, hop_length=hop_length)
+    chroma_raw = chroma_raw.astype(np.float32)
+    chroma_norm = chroma_raw / (np.linalg.norm(chroma_raw, axis=0, keepdims=True) + 1e-9)
+    return chroma_norm, harm_rms  # [12, frames], [frames]
+
+
+def emission_probs(chroma: np.ndarray, harm_rms: np.ndarray, labels: List[str], T: np.ndarray) -> np.ndarray:
     """
-    Similaridad coseno (dot) => logits => softmax.
+    Cosine similarity => logits => softmax, plus an N-state energy model.
     """
     # scores: [states, frames]
     scores = (T @ chroma).astype(np.float32)
 
-    # Estado "N": penaliza si hay energía armónica
-    energy = np.clip(np.mean(chroma, axis=0), 0, 1)
-    scores[0, :] = 0.25 - 1.25 * energy
+    harm = np.asarray(harm_rms, dtype=np.float32).reshape(-1) if harm_rms is not None else None
+    if harm is None or harm.shape[0] != chroma.shape[1]:
+        energy = np.clip(np.mean(chroma, axis=0), 0.0, 1.0)
+    else:
+        energy = np.clip(harm, 0.0, 1.0)
 
-    # softmax estable
+    bias = 2.0
+    slope = 6.0
+    scores[0, :] = float(bias) - float(slope) * energy
+
+    # stable softmax
     m = np.max(scores, axis=0, keepdims=True)
     ex = np.exp(scores - m)
     probs = ex / (np.sum(ex, axis=0, keepdims=True) + 1e-9)
     return probs.astype(np.float32)  # [states, frames]
+
 
 def frames_to_segments(best_states: np.ndarray, best_conf: np.ndarray, times: np.ndarray, min_len: float) -> List[Segment]:
     segs: List[Segment] = []
     if len(best_states) == 0:
         return segs
 
-    s0 = int(best_states[0])
-    t0 = float(times[0])
-    conf_acc = float(best_conf[0])
-    n = 1
-
+    spans: List[Tuple[int, int]] = []
+    start = 0
     for i in range(1, len(best_states)):
-        s = int(best_states[i])
-        if s != s0:
-            t1 = float(times[i])
-            conf = conf_acc / max(n, 1)
-            if (t1 - t0) >= min_len:
-                segs.append(Segment(start=t0, end=t1, label="", confidence=conf))
-                segs[-1].label_state = s0  # type: ignore[attr-defined]
-            t0 = float(times[i])
-            s0 = s
-            conf_acc = float(best_conf[i])
-            n = 1
-        else:
-            conf_acc += float(best_conf[i])
-            n += 1
+        if int(best_states[i]) != int(best_states[i - 1]):
+            spans.append((start, i))
+            start = i
+    spans.append((start, len(best_states)))
 
-    t1 = float(times[-1] + (times[1]-times[0] if len(times) > 1 else 0.02))
-    conf = conf_acc / max(n, 1)
-    if (t1 - t0) >= min_len:
-        segs.append(Segment(start=t0, end=t1, label="", confidence=conf))
-        segs[-1].label_state = s0  # type: ignore[attr-defined]
+    step = float(times[1] - times[0]) if len(times) > 1 else 0.02
+    out: List[Segment] = []
+    for a, b in spans:
+        t0 = float(times[a])
+        t1 = float(times[b - 1] + step)
+        conf = float(np.mean(best_conf[a:b])) if b > a else float(best_conf[a])
+        seg = Segment(start=t0, end=t1, label="", confidence=conf)
+        seg.label_state = int(best_states[a])  # type: ignore[attr-defined]
+        out.append(seg)
 
-    return segs
+    if min_len <= 0:
+        return out
+
+    i = 0
+    while i < len(out):
+        dur = float(out[i].end - out[i].start)
+        if dur < min_len and len(out) > 1:
+            if i == 0:
+                j = 1
+            elif i == len(out) - 1:
+                j = i - 1
+            else:
+                j = i - 1 if out[i - 1].confidence >= out[i + 1].confidence else i + 1
+
+            if j < i:
+                out[j].end = out[i].end
+            else:
+                out[j].start = out[i].start
+            out[j].confidence = float(max(out[j].confidence, out[i].confidence))
+            out.pop(i)
+            i = max(i - 1, 0)
+            continue
+        i += 1
+
+    return out
+
 
 def finalize_segments(raw_segs: List[Segment], labels: List[str]) -> List[Segment]:
     out: List[Segment] = []
