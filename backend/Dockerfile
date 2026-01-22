@@ -4,11 +4,13 @@ WORKDIR /app
 
 # Dependencias sistema: ffmpeg + libsndfile
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     ffmpeg libsndfile1 lilypond libgomp1 \
   && rm -rf /var/lib/apt/lists/*
 
 
 COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir Cython==0.29.37
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # Demucs/torch opcional: si quieres, descomenta en tu build real o usa requirements-demucs.txt.
