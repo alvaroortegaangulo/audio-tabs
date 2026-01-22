@@ -200,13 +200,63 @@ def quantize_note_events_to_score(
     note_events: list[NoteEvent],
     *,
     tempo_bpm: float,
+    beat_times: np.ndarray | None = None,
     time_signature: str = "4/4",
     min_grid_q: float = 0.25,
     snap_to_grid: bool = True,
     merge_gap_s: float = 0.02,
 ) -> QuantizeResult:
-    tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
-    sec_per_q = 60.0 / tempo
+    # 1. Determine "tempo" for grid calculations.
+    # If beat_times are provided, we warp everything to a 60 BPM domain (1 sec = 1 beat).
+    # Otherwise we use the constant tempo_bpm.
+    if beat_times is not None and len(beat_times) > 1:
+        # Warp events to beat domain
+        beats = np.array(beat_times, dtype=np.float64)
+        indices = np.arange(len(beats), dtype=np.float64)
+
+        # Average beat duration for extrapolation
+        avg_dur = float(np.mean(np.diff(beats)))
+        if avg_dur <= 0:
+            avg_dur = 0.5
+
+        def to_beats(t_arr: np.ndarray) -> np.ndarray:
+            # Linear interpolation with extrapolation
+            res = np.interp(t_arr, beats, indices, left=-1.0, right=-1.0)
+
+            # Fix left (before first beat)
+            mask_l = t_arr < beats[0]
+            if np.any(mask_l):
+                res[mask_l] = indices[0] - (beats[0] - t_arr[mask_l]) / avg_dur
+
+            # Fix right (after last beat)
+            mask_r = t_arr > beats[-1]
+            if np.any(mask_r):
+                res[mask_r] = indices[-1] + (t_arr[mask_r] - beats[-1]) / avg_dur
+            return res
+
+        start_times = np.array([e.start_time_s for e in note_events])
+        end_times = np.array([e.end_time_s for e in note_events])
+
+        new_starts = to_beats(start_times)
+        new_ends = to_beats(end_times)
+
+        warped_events = []
+        for i, ev in enumerate(note_events):
+            warped_events.append(NoteEvent(
+                start_time_s=float(new_starts[i]),
+                end_time_s=float(new_ends[i]),
+                pitch_midi=ev.pitch_midi,
+                velocity=ev.velocity,
+                amplitude=ev.amplitude
+            ))
+        note_events = warped_events
+
+        # In beat domain, 1.0 "seconds" = 1 beat (quarter note)
+        sec_per_q = 1.0
+        # Effectively 60 BPM
+    else:
+        tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
+        sec_per_q = 60.0 / tempo
 
     # Convert onsets to quarter units for grid selection.
     onsets_q = np.asarray([ev.start_time_s / sec_per_q for ev in note_events], dtype=np.float32)
@@ -217,6 +267,13 @@ def quantize_note_events_to_score(
 
     if snap_to_grid:
         note_events = _snap_note_events_to_grid(note_events, sec_per_q=sec_per_q, grid_q=grid_q)
+        # Gap for merge also needs to be in beat domain if we warped
+        # But merge_gap_s is typically small (0.02s).
+        # In beat domain (60BPM), 0.02s is 0.02 beats.
+        # If original tempo was 120, 0.02s is 0.04 beats.
+        # It scales roughly correctly if we treat gap_s as "units".
+        # Let's just use it as is, or scale it?
+        # Usually gap_s is for "humanization" removal. 0.02 units (beats) is fine (~1/50 beat).
         note_events = _merge_nearby_note_events(note_events, gap_s=merge_gap_s)
 
     # Key detection (music21).
@@ -240,6 +297,7 @@ def quantize_note_events_to_score(
     starts: dict[int, list[int]] = defaultdict(list)
     ends: dict[int, list[int]] = defaultdict(list)
     last_step = 0
+    min_step = 0
 
     for ev in note_events:
         if ev.end_time_s <= ev.start_time_s:
@@ -256,8 +314,15 @@ def quantize_note_events_to_score(
         starts[s].append(pitch)
         ends[e].append(pitch)
         last_step = max(last_step, e)
+        # Note: we might have negative steps if notes started before first beat
+        min_step = min(min_step, s)
 
     # Sweep steps into compressed chord/rest events.
+    # We always start from step 0 (implicit measure 1 beat 1).
+    # Any notes before step 0 are currently ignored by the loop range(0, ...).
+    # TODO: Support pickup measures if min_step < 0?
+    # For now, we stick to standard start at 0.
+
     active: dict[int, int] = {}
     events: list[tuple[list[int], int]] = []  # (pitches, duration_steps)
     prev_pitches: list[int] | None = None

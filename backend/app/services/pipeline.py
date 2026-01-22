@@ -363,6 +363,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     quant_res = quantize_note_events_to_score(
         note_events,
         tempo_bpm=float(tempo_bpm),
+        beat_times=_beat_times,
         time_signature=time_sig
     )
     score_data = quant_res.score
@@ -379,7 +380,8 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         key_signature_fifths=(key_sig.fifths if key_sig else None),
         title=title,
         instrument="guitar",
-        chords=[Segment(c.start, c.end, c.label, c.confidence) for c in spelled_chords]
+        chords=[Segment(c.start, c.end, c.label, c.confidence) for c in spelled_chords],
+        beat_times=_beat_times,
     )
 
     midi_path = out / "transcription.mid"

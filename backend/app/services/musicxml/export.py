@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import List, Optional
+import numpy as np
 
 from music21 import chord as m21chord
 from music21 import instrument as m21instrument
@@ -182,6 +183,7 @@ def export_musicxml(
     title: str = "Transcription",
     instrument: str = "piano",
     chords: List[Segment] | None = None,
+    beat_times: np.ndarray | None = None,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -233,12 +235,48 @@ def export_musicxml(
     seconds_per_beat = sec_per_q * beat_quarters
     chords_sorted = sorted(chords or [], key=lambda c: float(c.start))
 
+    # Prepare beat lookup for chords if beat_times is available
+    beat_times_lookup = None
+    if beat_times is not None and len(beat_times) > 1:
+        # We need a function that maps (measure_index, beat_index) -> time_s
+        beat_times_lookup = np.array(beat_times)
+
+        # If beat_times ends early, we extrapolate
+        avg_dur = float(np.mean(np.diff(beat_times_lookup)))
+        if avg_dur <= 0: avg_dur = 0.5
+
+        def get_time_at_beat_abs(beat_abs: float) -> float:
+            idx = int(beat_abs)
+            frac = beat_abs - idx
+
+            # Simple linear interp
+            if idx < 0:
+                # extrapolate left
+                return beat_times_lookup[0] + beat_abs * avg_dur
+            if idx >= len(beat_times_lookup) - 1:
+                # extrapolate right
+                return beat_times_lookup[-1] + (beat_abs - (len(beat_times_lookup)-1)) * avg_dur
+
+            return beat_times_lookup[idx] + frac * (beat_times_lookup[idx+1] - beat_times_lookup[idx])
+    else:
+        # Fallback to constant tempo
+        def get_time_at_beat_abs(beat_abs: float) -> float:
+            return beat_abs * seconds_per_beat
+
+
     def get_chords_for_measure(measure_idx: int) -> List[tuple[float, str]]:
         if not chords_sorted:
             return []
 
-        m_start_time = measure_idx * seconds_per_measure
-        m_end_time = m_start_time + seconds_per_measure
+        # Find time range for this measure using beats
+        # Measure start beat (0-indexed) = measure_idx * ts_num (assuming beat=quarter for denom=4)
+        # Actually ts_num is beats per measure.
+        beats_per_measure = float(ts_num)
+        start_beat_abs = measure_idx * beats_per_measure
+        end_beat_abs = (measure_idx + 1) * beats_per_measure
+
+        m_start_time = get_time_at_beat_abs(start_beat_abs)
+        m_end_time = get_time_at_beat_abs(end_beat_abs)
 
         # IMPORTANTE: Insertar ChordSymbol en offsets arbitrarios hace que music21
         # parta notas/rests en duraciones no expresables (e.g. 2048th), rompiendo
@@ -256,20 +294,17 @@ def export_musicxml(
         by_beat: dict[int, str] = {}
 
         # Chord al inicio del compás (si aplica)
-        start_lbl = label_at(m_start_time + 1e-6)
+        start_lbl = label_at(m_start_time + 1e-4) # small epsilon
         if start_lbl != "N":
             by_beat[0] = start_lbl
 
-        # Cambios dentro del compás: cuantiza hacia abajo al inicio del beat.
-        for c in chords_sorted:
-            c_start = float(c.start)
-            if c_start < m_start_time or c_start >= m_end_time:
-                continue
-            if not c.label or c.label == "N":
-                continue
-            beat_idx = int((c_start - m_start_time) / max(seconds_per_beat, 1e-9))
-            beat_idx = max(0, min(ts_num - 1, beat_idx))
-            by_beat[beat_idx] = str(c.label)
+        # New strategy: Query the chord at each beat start
+        for b in range(ts_num):
+            beat_time = get_time_at_beat_abs(start_beat_abs + b)
+            # Add a small offset to be inside the beat
+            lbl = label_at(beat_time + 0.05)
+            if lbl != "N":
+                by_beat[b] = lbl
 
         out: list[tuple[float, str]] = []
         prev = ""
@@ -278,6 +313,7 @@ def export_musicxml(
             if not lbl:
                 continue
             if b == 0 or lbl != prev:
+                # offset in quarters
                 out.append((float(b) * beat_quarters, lbl))
             prev = lbl
 
