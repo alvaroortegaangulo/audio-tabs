@@ -79,6 +79,25 @@ def _get_model() -> tuple[object | None, str | None]:
     return _MODEL, _MODEL_PATH
 
 
+def _resolve_transcribe() -> tuple[object, object]:
+    from omnizart.music import app as music_app  # type: ignore
+
+    if hasattr(music_app, "transcribe"):
+        return music_app.transcribe, music_app
+
+    for attr in ("MusicTranscription", "Transcriber", "Transcription"):
+        if hasattr(music_app, attr):
+            cls = getattr(music_app, attr)
+            try:
+                obj = cls()
+            except Exception:
+                continue
+            if hasattr(obj, "transcribe"):
+                return obj.transcribe, obj
+
+    raise RuntimeError("Omnizart transcribe entrypoint not found")
+
+
 def _enforce_thresholds(
     onset_threshold: float,
     frame_threshold: float,
@@ -284,11 +303,10 @@ def transcribe_basic_pitch(
     )
 
     model_obj, model_path = _get_model()
-
-    from omnizart.music import app as music_app  # type: ignore
+    transcribe_fn, _ctx = _resolve_transcribe()
 
     kwargs: dict[str, object] = {}
-    sig = inspect.signature(music_app.transcribe)
+    sig = inspect.signature(transcribe_fn)
     if model_path is not None and "model_path" in sig.parameters:
         kwargs["model_path"] = model_path
     if model_obj is not None and "model" in sig.parameters:
@@ -300,7 +318,7 @@ def transcribe_basic_pitch(
     with tempfile.TemporaryDirectory() as tmp_dir:
         if "output" in sig.parameters:
             kwargs["output"] = str(tmp_dir)
-        result = music_app.transcribe(str(audio_path), **kwargs)
+        result = transcribe_fn(str(audio_path), **kwargs)
 
         notes = _extract_notes(result)
         if not notes:
