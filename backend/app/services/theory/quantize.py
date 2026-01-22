@@ -69,6 +69,7 @@ def estimate_key_signature_music21(note_events: list[NoteEvent]) -> KeySignature
 class QuantizeResult:
     score: ScoreData
     key_signature: KeySignature | None
+    pickup_quarters: float = 0.0
 
 
 def _choose_grid_q(onsets_q: np.ndarray) -> tuple[float, Literal["straight", "triplet"]]:
@@ -324,17 +325,14 @@ def quantize_note_events_to_score(
         min_step = min(min_step, s)
 
     # Sweep steps into compressed chord/rest events.
-    # We always start from step 0 (implicit measure 1 beat 1).
-    # Any notes before step 0 are currently ignored by the loop range(0, ...).
-    # TODO: Support pickup measures if min_step < 0?
-    # For now, we stick to standard start at 0.
+    # If min_step < 0 we keep those steps to support pickup/anacrusa.
 
     active: dict[int, int] = {}
     events: list[tuple[list[int], int]] = []  # (pitches, duration_steps)
     prev_pitches: list[int] | None = None
     prev_len = 0
 
-    for step in range(0, last_step):
+    for step in range(min_step, last_step):
         for p in ends.get(step, []):
             active[p] = active.get(p, 0) - 1
             if active[p] <= 0:
@@ -364,7 +362,13 @@ def quantize_note_events_to_score(
     measures: list[ScoreMeasure] = []
     current_measure_items: list[ScoreItem] = []
     measure_number = 1
-    remaining_steps = steps_per_measure
+    pickup_steps = max(0, int(-min_step))
+    # If pickup spans multiple full measures, keep only the remainder to avoid
+    # overlong measures (rare; usually indicates a noisy beat track).
+    if pickup_steps >= steps_per_measure:
+        pickup_steps = int(pickup_steps % steps_per_measure)
+    remaining_steps = pickup_steps if pickup_steps > 0 else steps_per_measure
+    pickup_quarters = float(pickup_steps) * float(grid_q)
 
     def flush_measure():
         nonlocal current_measure_items, measure_number
@@ -429,4 +433,4 @@ def quantize_note_events_to_score(
         flush_measure()
 
     score = ScoreData(grid_q=float(grid_q), grid_kind=grid_kind, measures=measures)
-    return QuantizeResult(score=score, key_signature=key_sig)
+    return QuantizeResult(score=score, key_signature=key_sig, pickup_quarters=pickup_quarters)

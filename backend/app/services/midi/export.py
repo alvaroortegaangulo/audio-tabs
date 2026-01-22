@@ -73,6 +73,7 @@ def export_chords_midi(
 ) -> None:
     """
     Create a simple MIDI file that plays block chords on each beat.
+    start_time_s can be negative to include a pickup before beat 1.
     """
     from music21 import chord as m21chord
     from music21 import instrument as m21instrument

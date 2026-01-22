@@ -6,6 +6,7 @@ from typing import List, Tuple
 
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 NON_CHORD_TONE_PENALTY = 0.35
+COMPLEXITY_PENALTY = 0.18
 
 
 @dataclass
@@ -106,6 +107,18 @@ def emission_probs(chroma: np.ndarray, harm_rms: np.ndarray, labels: List[str], 
     """
     # scores: [states, frames]
     scores = (T @ chroma).astype(np.float32)
+
+    # Penalize more complex qualities unless evidence is strong.
+    if labels:
+        penalties = np.zeros((len(labels),), dtype=np.float32)
+        for i, lbl in enumerate(labels):
+            if ":" not in lbl:
+                continue
+            qual = lbl.split(":", 1)[1].strip().lower()
+            if qual in ("7", "min7", "m7", "maj7"):
+                penalties[i] = float(COMPLEXITY_PENALTY)
+        if np.any(penalties > 0):
+            scores = scores - penalties[:, None]
 
     harm = np.asarray(harm_rms, dtype=np.float32).reshape(-1) if harm_rms is not None else None
     if harm is None or harm.shape[0] != chroma.shape[1]:

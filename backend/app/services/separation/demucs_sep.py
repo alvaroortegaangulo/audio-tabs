@@ -64,6 +64,12 @@ def select_stem_path(stems_dir: Path, preference: Iterable[str] = ("other", "voc
     raise FileNotFoundError("No usable stem found for transcription")
 
 
+def get_stem_path(stems_dir: Path, stem: str) -> Path | None:
+    stem_name = f"{stem}.wav"
+    p = stems_dir / stem_name
+    return p if p.exists() else None
+
+
 def run_demucs_4stems(
     input_wav: Path,
     out_dir: Path,

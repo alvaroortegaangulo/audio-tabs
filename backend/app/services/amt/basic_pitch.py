@@ -36,9 +36,10 @@ def _enforce_thresholds(
     frame_threshold: float,
     minimum_note_length_ms: float,
 ) -> tuple[float, float, float]:
-    onset = max(0.6, float(onset_threshold))
-    frame = max(0.4, float(frame_threshold))
-    min_len_ms = max(60.0, float(minimum_note_length_ms))
+    # Respect settings but keep values in valid ranges.
+    onset = min(1.0, max(0.0, float(onset_threshold)))
+    frame = min(1.0, max(0.0, float(frame_threshold)))
+    min_len_ms = max(20.0, float(minimum_note_length_ms))
     return onset, frame, min_len_ms
 
 

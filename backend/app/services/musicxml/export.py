@@ -267,6 +267,7 @@ def export_musicxml(
     instrument: str = "piano",
     chords: List[Segment] | None = None,
     beat_times: np.ndarray | None = None,
+    pickup_quarters: float = 0.0,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -312,6 +313,8 @@ def export_musicxml(
 
     quarter_length_per_measure = float(ts_num) * (4.0 / float(ts_den))
     beat_quarters = 4.0 / float(ts_den)
+    pickup_quarters = max(0.0, float(pickup_quarters or 0.0))
+    pickup_beats = pickup_quarters / beat_quarters if beat_quarters > 0 else 0.0
 
     sec_per_q = 60.0 / float(tempo_bpm if tempo_bpm else 120.0)
     seconds_per_measure = sec_per_q * quarter_length_per_measure
@@ -353,10 +356,21 @@ def export_musicxml(
 
         # Find time range for this measure using beats
         # Measure start beat (0-indexed) = measure_idx * ts_num (assuming beat=quarter for denom=4)
-        # Actually ts_num is beats per measure.
+        # If there is a pickup, measure 0 spans negative beats up to beat 0.
         beats_per_measure = float(ts_num)
-        start_beat_abs = measure_idx * beats_per_measure
-        end_beat_abs = (measure_idx + 1) * beats_per_measure
+        if pickup_beats > 1e-6:
+            if measure_idx == 0:
+                start_beat_abs = -pickup_beats
+                end_beat_abs = 0.0
+                beats_in_measure = max(1, int(np.ceil(pickup_beats)))
+            else:
+                start_beat_abs = (measure_idx - 1) * beats_per_measure
+                end_beat_abs = measure_idx * beats_per_measure
+                beats_in_measure = ts_num
+        else:
+            start_beat_abs = measure_idx * beats_per_measure
+            end_beat_abs = (measure_idx + 1) * beats_per_measure
+            beats_in_measure = ts_num
 
         m_start_time = get_time_at_beat_abs(start_beat_abs)
         m_end_time = get_time_at_beat_abs(end_beat_abs)
@@ -382,7 +396,7 @@ def export_musicxml(
             by_beat[0] = start_lbl
 
         # New strategy: Query the chord at each beat start
-        for b in range(ts_num):
+        for b in range(beats_in_measure):
             beat_time = get_time_at_beat_abs(start_beat_abs + b)
             # Add a small offset to be inside the beat
             lbl = label_at(beat_time + 0.05)
@@ -391,7 +405,7 @@ def export_musicxml(
 
         out: list[tuple[float, str]] = []
         prev = ""
-        for b in range(ts_num):
+        for b in range(beats_in_measure):
             lbl = by_beat.get(b)
             if not lbl:
                 continue
