@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -10,7 +11,7 @@ import numpy as np
 import soundfile as sf
 
 from app.core.config import settings
-from app.schemas import JobResult, KeySignature, ChordSegment, ScoreData
+from app.schemas import JobResult, KeySignature, ChordSegment, ScoreData, ScoreItem, ScoreMeasure
 from app.services.audio import ffmpeg_to_wav_mono_44k, load_wav, peak_normalize
 from app.services.chords.extract import extract_chords_template
 from app.services.grid.beats import estimate_beats_librosa, normalize_beat_times
@@ -24,12 +25,35 @@ from app.services.amt.basic_pitch import transcribe_basic_pitch, NoteEvent, save
 from app.services.separation.demucs_sep import run_demucs_4stems, select_stem_path, get_stem_path
 from app.services.theory.quantize import quantize_note_events_to_score
 from app.services.musicxml.export import export_musicxml
+from app.services.accompaniment.strum import detect_strum_onsets
+from app.services.accompaniment.shapes import pick_shape_for_chord, shape_pitches, shape_positions, shape_to_dict, Shape
 
 _CHORD_TONE_BIAS = 0.08
 _CHORD_CONFIDENCE_THRESHOLD = 0.03
 _SEVENTH_MIN_CONFIDENCE = 0.03
 _SEVENTH_MIN_DURATION = 0.6
 _SEVENTH_RATIO = 0.55
+_ACC_MIN_GRID_Q = 0.5
+_ACC_MIN_SEGMENT_SEC = 0.6
+_ACC_MIN_CONFIDENCE = 0.05
+_ACC_SWITCH_PENALTY = 4.0
+
+_VF_NOTE_NAMES_SHARP = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"]
+_VF_NOTE_NAMES_FLAT = ["c", "db", "d", "eb", "e", "f", "gb", "g", "ab", "a", "bb", "b"]
+
+_DUR_TOKENS_STRAIGHT: list[tuple[str, int, float]] = [
+    ("w", 0, 4.0),
+    ("h", 1, 3.0),
+    ("h", 0, 2.0),
+    ("q", 1, 1.5),
+    ("q", 0, 1.0),
+    ("8", 1, 0.75),
+    ("8", 0, 0.5),
+    ("16", 1, 0.375),
+    ("16", 0, 0.25),
+    ("32", 1, 0.1875),
+    ("32", 0, 0.125),
+]
 
 def _job_title(job_dir: Path, input_path: Path) -> str:
     meta_path = job_dir / "input" / "meta.json"
@@ -41,6 +65,329 @@ def _job_title(job_dir: Path, input_path: Path) -> str:
     except Exception:
         pass
     return input_path.stem or "Lead Sheet"
+
+
+@dataclass(frozen=True)
+class _StrumEvent:
+    time_s: float
+    keys: list[str]
+    positions: list[tuple[int, int]]
+    pitches: list[int]
+
+
+def _normalize_transcription_mode(mode: str | None) -> str:
+    mode = str(mode or "notes").strip().lower()
+    if mode not in ("notes", "accompaniment"):
+        return "notes"
+    return mode
+
+
+def _midi_to_vf_key(pitch_midi: int, *, use_flats: bool) -> str:
+    pc = int(pitch_midi) % 12
+    octave = int(pitch_midi) // 12 - 1
+    name = _VF_NOTE_NAMES_FLAT[pc] if use_flats else _VF_NOTE_NAMES_SHARP[pc]
+    return f"{name}/{octave}"
+
+
+def _decompose_duration_straight(duration_q: float) -> list[tuple[str, int, float]]:
+    out: list[tuple[str, int, float]] = []
+    rem = float(duration_q)
+    eps = 1e-6
+
+    for dur, dots, ql in _DUR_TOKENS_STRAIGHT:
+        while rem + eps >= ql:
+            out.append((dur, dots, ql))
+            rem -= ql
+
+    if rem > 1e-3:
+        out.append(("32", 0, max(0.125, rem)))
+
+    return out
+
+
+def _to_beats(times_s: np.ndarray, beat_times: np.ndarray) -> np.ndarray:
+    beats = np.asarray(beat_times, dtype=np.float64)
+    beats = beats[np.isfinite(beats)]
+    beats = np.sort(beats)
+    indices = np.arange(len(beats), dtype=np.float64)
+    avg_dur = float(np.mean(np.diff(beats))) if len(beats) > 1 else 0.5
+    if avg_dur <= 0:
+        avg_dur = 0.5
+    res = np.interp(times_s, beats, indices, left=-1.0, right=-1.0)
+
+    mask_l = times_s < beats[0]
+    if np.any(mask_l):
+        res[mask_l] = indices[0] - (beats[0] - times_s[mask_l]) / avg_dur
+
+    mask_r = times_s > beats[-1]
+    if np.any(mask_r):
+        res[mask_r] = indices[-1] + (times_s[mask_r] - beats[-1]) / avg_dur
+
+    return res
+
+
+def _choose_strum_grid(positions: np.ndarray) -> float:
+    if positions.size == 0:
+        return 0.5
+
+    candidates = [
+        (0.25, 1.1),
+        (0.5, 1.0),
+        (1.0, 1.05),
+    ]
+    best = None
+    for grid, penalty in candidates:
+        q = np.round(positions / grid) * grid
+        err = float(np.mean(np.abs(positions - q)))
+        cost = err * penalty
+        if best is None or cost < best[0]:
+            best = (cost, grid)
+    assert best is not None
+    return float(best[1])
+
+
+def _assign_shapes(chords: list[ChordSegment]) -> list[tuple[ChordSegment, Shape | None]]:
+    out: list[tuple[ChordSegment, Shape | None]] = []
+    prev: Shape | None = None
+    for seg in chords:
+        if seg.label == "N":
+            out.append((seg, None))
+            continue
+        shape = pick_shape_for_chord(seg.label, prev)
+        if shape is not None:
+            prev = shape
+        out.append((seg, shape))
+    return out
+
+
+def _shape_at_time(
+    t_sec: float,
+    segments: list[tuple[ChordSegment, Shape | None]],
+    idx: int,
+) -> tuple[int, Shape | None, str]:
+    i = idx
+    while i < len(segments) and float(segments[i][0].end) <= t_sec:
+        i += 1
+    if i >= len(segments):
+        return i, None, "N"
+    seg, shape = segments[i]
+    if float(seg.start) <= t_sec < float(seg.end):
+        return i, shape, str(seg.label or "N")
+    return i, None, "N"
+
+
+def _build_strum_events(
+    onsets_s: np.ndarray,
+    segments: list[tuple[ChordSegment, Shape | None]],
+    *,
+    use_flats: bool,
+) -> list[_StrumEvent]:
+    if onsets_s.size == 0:
+        return []
+
+    events: list[_StrumEvent] = []
+    seg_idx = 0
+    for t in np.sort(onsets_s):
+        seg_idx, shape, _label = _shape_at_time(float(t), segments, seg_idx)
+        if shape is None:
+            events.append(_StrumEvent(time_s=float(t), keys=[], positions=[], pitches=[]))
+            continue
+        pitches = shape_pitches(shape)
+        positions = shape_positions(shape)
+        keys = [_midi_to_vf_key(p, use_flats=use_flats) for p in pitches]
+        events.append(_StrumEvent(time_s=float(t), keys=keys, positions=positions, pitches=pitches))
+    return events
+
+
+def _strum_events_to_note_events(
+    events: list[_StrumEvent],
+    *,
+    tempo_bpm: float,
+) -> list[NoteEvent]:
+    tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
+    sec_per_q = 60.0 / tempo
+    dur_s = max(0.08, 0.2 * sec_per_q)
+    out: list[NoteEvent] = []
+    for ev in events:
+        for pitch in ev.pitches:
+            out.append(
+                NoteEvent(
+                    start_time_s=float(ev.time_s),
+                    end_time_s=float(ev.time_s) + float(dur_s),
+                    pitch_midi=int(pitch),
+                    velocity=90,
+                    amplitude=1.0,
+                )
+            )
+    return out
+
+
+def _quantize_strum_events(
+    events: list[_StrumEvent],
+    *,
+    beat_times: np.ndarray | None,
+    tempo_bpm: float,
+    time_signature: str,
+    min_grid_q: float,
+) -> tuple[ScoreData, float, list[list[list[tuple[int, int]]]]]:
+    if not events:
+        try:
+            num_s, den_s = (time_signature or "4/4").split("/")
+            num = int(num_s)
+            den = int(den_s)
+        except Exception:
+            num, den = 4, 4
+        measure_q = float(num) * (4.0 / float(den))
+        items: list[ScoreItem] = []
+        positions: list[list[tuple[int, int]]] = []
+        for dur, dots, _ql in _decompose_duration_straight(measure_q):
+            items.append(ScoreItem(rest=True, keys=[], duration=dur, dots=dots))
+            positions.append([])
+        empty = ScoreMeasure(number=1, items=items)
+        return ScoreData(grid_q=1.0, grid_kind="straight", measures=[empty]), 0.0, [positions]
+
+    times = np.asarray([e.time_s for e in events], dtype=np.float64)
+    if beat_times is not None and len(beat_times) > 1:
+        positions = _to_beats(times, np.asarray(beat_times, dtype=np.float64))
+    else:
+        tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
+        sec_per_q = 60.0 / tempo
+        positions = times / float(sec_per_q)
+
+    grid_q = _choose_strum_grid(positions)
+    grid_q = max(float(grid_q), float(min_grid_q))
+
+    steps = np.round(positions / grid_q).astype(int)
+    step_map: dict[int, _StrumEvent] = {}
+    for step, ev in zip(steps, events):
+        prev = step_map.get(int(step))
+        if prev is None or len(ev.keys) > len(prev.keys):
+            step_map[int(step)] = ev
+
+    steps_sorted = sorted(step_map.keys())
+    if not steps_sorted:
+        try:
+            num_s, den_s = (time_signature or "4/4").split("/")
+            num = int(num_s)
+            den = int(den_s)
+        except Exception:
+            num, den = 4, 4
+        measure_q = float(num) * (4.0 / float(den))
+        items: list[ScoreItem] = []
+        positions: list[list[tuple[int, int]]] = []
+        for dur, dots, _ql in _decompose_duration_straight(measure_q):
+            items.append(ScoreItem(rest=True, keys=[], duration=dur, dots=dots))
+            positions.append([])
+        empty = ScoreMeasure(number=1, items=items)
+        return ScoreData(grid_q=float(grid_q), grid_kind="straight", measures=[empty]), 0.0, [positions]
+
+    min_step = min(0, int(steps_sorted[0]))
+    default_steps = max(1, int(round(1.0 / float(grid_q))))
+
+    timeline: list[tuple[list[str], list[tuple[int, int]], int]] = []
+    if steps_sorted[0] > min_step:
+        timeline.append(([], [], int(steps_sorted[0] - min_step)))
+
+    for i, step in enumerate(steps_sorted):
+        ev = step_map[int(step)]
+        next_step = steps_sorted[i + 1] if i + 1 < len(steps_sorted) else int(step) + default_steps
+        dur = int(next_step - int(step))
+        if dur <= 0:
+            dur = 1
+        timeline.append((list(ev.keys), list(ev.positions), dur))
+
+    try:
+        num_s, den_s = (time_signature or "4/4").split("/")
+        num = int(num_s)
+        den = int(den_s)
+    except Exception:
+        num, den = 4, 4
+
+    measure_q = float(num) * (4.0 / float(den))
+    steps_per_measure = int(round(measure_q / float(grid_q))) if grid_q > 0 else 16
+    if steps_per_measure <= 0:
+        steps_per_measure = 16
+
+    pickup_steps = max(0, int(-min_step))
+    if pickup_steps >= steps_per_measure:
+        pickup_steps = int(pickup_steps % steps_per_measure)
+    pickup_quarters = float(pickup_steps) * float(grid_q)
+
+    measures: list[ScoreMeasure] = []
+    tab_positions: list[list[list[tuple[int, int]]]] = []
+    current_items: list[ScoreItem] = []
+    current_positions: list[list[tuple[int, int]]] = []
+    measure_number = 1
+    remaining_steps = pickup_steps if pickup_steps > 0 else steps_per_measure
+
+    def flush_measure() -> None:
+        nonlocal current_items, current_positions, measure_number
+        measures.append(ScoreMeasure(number=measure_number, items=current_items))
+        tab_positions.append(current_positions)
+        current_items = []
+        current_positions = []
+        measure_number += 1
+
+    def emit_item(keys: list[str], positions: list[tuple[int, int]], duration: str, dots: int, tie: str | None) -> None:
+        current_items.append(
+            ScoreItem(
+                rest=(len(keys) == 0),
+                keys=list(keys),
+                duration=duration,
+                dots=dots,
+                tie=tie,  # type: ignore[arg-type]
+            )
+        )
+        current_positions.append(list(positions) if keys else [])
+
+    for keys, positions, dur_steps in timeline:
+        if dur_steps <= 0:
+            continue
+
+        count_steps = int(dur_steps)
+        if keys:
+            rem = int(remaining_steps)
+            steps_left = int(count_steps)
+            item_total = 0
+            while steps_left > 0:
+                take = min(steps_left, rem)
+                parts = _decompose_duration_straight(float(take) * float(grid_q))
+                item_total += len(parts)
+                steps_left -= take
+                rem -= take
+                if rem <= 0:
+                    rem = int(steps_per_measure)
+        else:
+            item_total = 0
+
+        steps_left = int(count_steps)
+        item_idx = 0
+        while steps_left > 0:
+            take = min(steps_left, remaining_steps)
+            dur_q = float(take) * float(grid_q)
+            parts = _decompose_duration_straight(dur_q)
+            for i, (dur, dots, _ql) in enumerate(parts):
+                item_idx += 1
+                tie = None
+                if keys and item_total > 1:
+                    if item_idx == 1:
+                        tie = "start"
+                    elif item_idx == item_total:
+                        tie = "stop"
+                    else:
+                        tie = "continue"
+                emit_item(keys, positions, duration=dur, dots=dots, tie=tie)
+            steps_left -= take
+            remaining_steps -= take
+            if remaining_steps <= 0:
+                flush_measure()
+                remaining_steps = int(steps_per_measure)
+
+    if current_items:
+        flush_measure()
+
+    score = ScoreData(grid_q=float(grid_q), grid_kind="straight", measures=measures)
+    return score, pickup_quarters, tab_positions
 
 # Chords imports
 from app.services.chords.template import (
@@ -402,6 +749,77 @@ def _simplify_chord_segments(
     return out
 
 
+def _simplify_chords_for_accompaniment(
+    chords: list[ChordSegment],
+    *,
+    min_duration: float,
+    min_confidence: float,
+) -> list[ChordSegment]:
+    if not chords:
+        return []
+
+    triads: list[ChordSegment] = []
+    for c in chords:
+        label = str(c.label or "N")
+        root, qual = _parse_chord_label(label)
+        if root is None or qual is None:
+            triads.append(c)
+            continue
+        triads.append(
+            ChordSegment(
+                start=float(c.start),
+                end=float(c.end),
+                label=_triad_label(root, qual),
+                confidence=float(c.confidence),
+            )
+        )
+
+    out: list[ChordSegment] = []
+    i = 0
+    while i < len(triads):
+        seg = triads[i]
+        dur = float(seg.end) - float(seg.start)
+        if dur < float(min_duration) or float(seg.confidence) < float(min_confidence):
+            if i + 1 < len(triads):
+                nxt = triads[i + 1]
+                out.append(
+                    ChordSegment(
+                        start=float(seg.start),
+                        end=float(nxt.end),
+                        label=str(nxt.label),
+                        confidence=max(float(seg.confidence), float(nxt.confidence)),
+                    )
+                )
+                i += 2
+                continue
+            if out:
+                prev = out[-1]
+                out[-1] = ChordSegment(
+                    start=float(prev.start),
+                    end=float(seg.end),
+                    label=str(prev.label),
+                    confidence=max(float(prev.confidence), float(seg.confidence)),
+                )
+                i += 1
+                continue
+        out.append(seg)
+        i += 1
+
+    merged: list[ChordSegment] = []
+    for seg in out:
+        if merged and str(seg.label) == str(merged[-1].label):
+            prev = merged[-1]
+            merged[-1] = ChordSegment(
+                start=float(prev.start),
+                end=float(seg.end),
+                label=str(prev.label),
+                confidence=max(float(prev.confidence), float(seg.confidence)),
+            )
+        else:
+            merged.append(seg)
+    return merged
+
+
 def _tempo_from_beat_times(beat_times: np.ndarray | None) -> float:
     if beat_times is None or len(beat_times) < 2:
         return 0.0
@@ -494,6 +912,9 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     work.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
 
+    transcription_mode = _normalize_transcription_mode(settings.TRANSCRIPTION_MODE)
+    is_accompaniment = transcription_mode == "accompaniment"
+
     wav_path = work / "audio_mono_44k.wav"
     ffmpeg_to_wav_mono_44k(input_path, wav_path)
 
@@ -554,19 +975,22 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     tempo_for_bp = float(tempo_raw) if tempo_raw and tempo_raw > 0 else 120.0
 
     # --- 1. Basic Pitch Transcription ---
-    try:
-        midi_data, note_events = transcribe_basic_pitch(
-            harmonic_path,
-            midi_tempo=float(tempo_for_bp),
-            onset_threshold=float(settings.BASIC_PITCH_ONSET_THRESHOLD),
-            frame_threshold=float(settings.BASIC_PITCH_FRAME_THRESHOLD),
-            minimum_note_length_ms=float(settings.BASIC_PITCH_MIN_NOTE_MS),
-            melodia_trick=True,
-        )
-    except Exception as e:
-        print(f"Error executing basic_pitch: {e}")
-        note_events = []
-        midi_data = None
+    note_events: list[NoteEvent] = []
+    midi_data = None
+    if not is_accompaniment and bool(settings.ENABLE_BASIC_PITCH):
+        try:
+            midi_data, note_events = transcribe_basic_pitch(
+                harmonic_path,
+                midi_tempo=float(tempo_for_bp),
+                onset_threshold=float(settings.BASIC_PITCH_ONSET_THRESHOLD),
+                frame_threshold=float(settings.BASIC_PITCH_FRAME_THRESHOLD),
+                minimum_note_length_ms=float(settings.BASIC_PITCH_MIN_NOTE_MS),
+                melodia_trick=True,
+            )
+        except Exception as e:
+            print(f"Error executing basic_pitch: {e}")
+            note_events = []
+            midi_data = None
 
     # Decide whether to keep beats as-is (double-time) or halved (half-time) based on
     # readability of the quantized score. This keeps `tempo_bpm`, `beat_times`, and
@@ -580,12 +1004,20 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     note_events = _shift_note_events(note_events, beat_offset)
 
     # --- 2. Chord Detection ---
+    chord_vocab = str(settings.CHORD_VOCAB)
+    switch_penalty = float(settings.SWITCH_PENALTY)
+    min_segment_sec = float(settings.MIN_SEGMENT_SEC)
+    if is_accompaniment:
+        chord_vocab = "majmin"
+        switch_penalty = max(switch_penalty, float(_ACC_SWITCH_PENALTY))
+        min_segment_sec = max(min_segment_sec, float(_ACC_MIN_SEGMENT_SEC))
+
     chroma, _times, chords = extract_chords_template(
         y_harm,
         sr_trans,
-        vocab=str(settings.CHORD_VOCAB),
-        switch_penalty=float(settings.SWITCH_PENALTY),
-        min_segment_sec=float(settings.MIN_SEGMENT_SEC),
+        vocab=chord_vocab,
+        switch_penalty=float(switch_penalty),
+        min_segment_sec=float(min_segment_sec),
         beat_times=beat_times_sel,
     )
 
@@ -614,14 +1046,21 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             )
         )
 
-    spelled_chords = _simplify_chord_segments(
-        spelled_chords,
-        chroma=chroma,
-        times=_times,
-        min_confidence=float(_SEVENTH_MIN_CONFIDENCE),
-        min_duration=float(_SEVENTH_MIN_DURATION),
-        seventh_ratio=float(_SEVENTH_RATIO),
-    )
+    if is_accompaniment:
+        spelled_chords = _simplify_chords_for_accompaniment(
+            spelled_chords,
+            min_duration=float(_ACC_MIN_SEGMENT_SEC),
+            min_confidence=float(_ACC_MIN_CONFIDENCE),
+        )
+    else:
+        spelled_chords = _simplify_chord_segments(
+            spelled_chords,
+            chroma=chroma,
+            times=_times,
+            min_confidence=float(_SEVENTH_MIN_CONFIDENCE),
+            min_duration=float(_SEVENTH_MIN_DURATION),
+            seventh_ratio=float(_SEVENTH_RATIO),
+        )
     spelled_chords = _shift_chords(spelled_chords, beat_offset)
 
     if note_events:
@@ -658,6 +1097,49 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             onset_window_s=0.06,
         )
 
+    strum_onsets = np.asarray([], dtype=np.float32)
+    strum_events: list[_StrumEvent] = []
+    tab_positions: list[list[list[tuple[int, int]]]] | None = None
+    segment_shapes: list[tuple[ChordSegment, Shape | None]] = []
+    note_events_debug = note_events
+
+    if is_accompaniment:
+        try:
+            strum_onsets = detect_strum_onsets(
+                y_trans,
+                sr_trans,
+                beat_times=beat_times_sel,
+                tempo_bpm=float(tempo_bpm),
+                min_interval_s=0.12,
+                onset_delta=0.2,
+                backtrack=False,
+            )
+            strum_onsets = (strum_onsets.astype(np.float32) - float(beat_offset)).astype(np.float32)
+        except Exception as e:
+            print(f"Error detecting strum onsets: {e}")
+            strum_onsets = np.asarray([], dtype=np.float32)
+
+        segment_shapes = _assign_shapes(spelled_chords)
+        strum_events = _build_strum_events(strum_onsets, segment_shapes, use_flats=use_flats)
+        score_data, pickup_quarters, tab_positions = _quantize_strum_events(
+            strum_events,
+            beat_times=beat_times_norm,
+            tempo_bpm=float(tempo_bpm),
+            time_signature=time_sig,
+            min_grid_q=float(_ACC_MIN_GRID_Q),
+        )
+        note_events_debug = _strum_events_to_note_events(strum_events, tempo_bpm=float(tempo_bpm))
+    else:
+        # --- 3. Quantization to ScoreData ---
+        quant_res = quantize_note_events_to_score(
+            note_events,
+            tempo_bpm=float(tempo_bpm),
+            beat_times=beat_times_norm,
+            time_signature=time_sig
+        )
+        score_data = quant_res.score
+        pickup_quarters = float(quant_res.pickup_quarters)
+
     # --- Debug artifacts ---
     try:
         beat_payload = {
@@ -668,6 +1150,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             "beat_offset_s": float(beat_offset),
             "beat_source": beat_source,
             "transcription_source": transcription_source,
+            "transcription_mode": transcription_mode,
             "demucs_enabled": bool(settings.ENABLE_DEMUCS),
             "demucs_error": demucs_error,
         }
@@ -675,23 +1158,34 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             json.dumps(beat_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-        save_note_events_csv(note_events, out / "note_events.csv")
+        save_note_events_csv(note_events_debug, out / "note_events.csv")
         chords_payload = [c.model_dump() for c in spelled_chords]
         (out / "chords.json").write_text(
             json.dumps(chords_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        if is_accompaniment:
+            (out / "strum_onsets.json").write_text(
+                json.dumps({"onsets_s": strum_onsets.tolist()}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            shapes_payload = []
+            for seg, shape in segment_shapes:
+                shapes_payload.append(
+                    {
+                        "start": float(seg.start),
+                        "end": float(seg.end),
+                        "label": str(seg.label),
+                        "confidence": float(seg.confidence),
+                        "shape": (shape_to_dict(shape) if shape is not None else None),
+                    }
+                )
+            (out / "chosen_shapes.json").write_text(
+                json.dumps(shapes_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
     except Exception as e:
         print(f"Error writing debug artifacts: {e}")
-
-    # --- 3. Quantization to ScoreData ---
-    quant_res = quantize_note_events_to_score(
-        note_events,
-        tempo_bpm=float(tempo_bpm),
-        beat_times=beat_times_norm,
-        time_signature=time_sig
-    )
-    score_data = quant_res.score
 
     title = _job_title(job_dir, input_path)
     musicxml_path = out / "result.musicxml"
@@ -707,21 +1201,35 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         instrument="guitar",
         chords=[Segment(c.start, c.end, c.label, c.confidence) for c in spelled_chords],
         beat_times=beat_times_norm,
-        pickup_quarters=float(quant_res.pickup_quarters),
+        pickup_quarters=float(pickup_quarters),
+        slash_notation=bool(is_accompaniment),
+        tab_positions=tab_positions,
     )
 
     midi_path = out / "transcription.mid"
     midi_start = 0.0
     if spelled_chords:
         midi_start = min(0.0, min(float(c.start) for c in spelled_chords))
-    export_chords_midi(
-        midi_path,
-        spelled_chords,
-        tempo_bpm=float(tempo_bpm),
-        time_signature=time_sig,
-        root_octave=3,
-        start_time_s=float(midi_start),
-    )
+    if is_accompaniment and strum_onsets.size > 0:
+        midi_start = min(float(midi_start), float(np.min(strum_onsets)))
+        export_chords_midi(
+            midi_path,
+            spelled_chords,
+            tempo_bpm=float(tempo_bpm),
+            time_signature=time_sig,
+            root_octave=3,
+            start_time_s=float(midi_start),
+            onset_times_s=[float(t) for t in strum_onsets],
+        )
+    else:
+        export_chords_midi(
+            midi_path,
+            spelled_chords,
+            tempo_bpm=float(tempo_bpm),
+            time_signature=time_sig,
+            root_octave=3,
+            start_time_s=float(midi_start),
+        )
 
     # PDF (LilyPond) generation - kept as fallback/supplement
     # Ideally LilyPond service should also be updated to support full score,
@@ -741,13 +1249,17 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         except Exception as e:
             pdf_error = f"No se pudo generar PDF (LilyPond): {e}"
 
+    backend_name = "basic_pitch+chords_viterbi"
+    if is_accompaniment:
+        backend_name = "accompaniment+chords_viterbi"
+
     return JobResult(
         job_id=job_dir.name,
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
         key_signature=key_sig,
         chords=spelled_chords,
-        transcription_backend="basic_pitch+chords_viterbi",
+        transcription_backend=backend_name,
         transcription_error=pdf_error,
         score=score_data,
     )

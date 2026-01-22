@@ -70,10 +70,12 @@ def export_chords_midi(
     time_signature: str = "4/4",
     root_octave: int = 3,
     start_time_s: float = 0.0,
+    onset_times_s: List[float] | None = None,
 ) -> None:
     """
-    Create a simple MIDI file that plays block chords on each beat.
-    start_time_s can be negative to include a pickup before beat 1.
+    Create a simple MIDI file that plays block chords on each beat or on
+    specific onset times. start_time_s can be negative to include a pickup
+    before beat 1.
     """
     from music21 import chord as m21chord
     from music21 import instrument as m21instrument
@@ -92,10 +94,9 @@ def export_chords_midi(
 
     chords_sorted = sorted(chords or [], key=lambda c: float(c.start))
     start_time_s = float(start_time_s or 0.0)
-    total_sec = max((float(c.end) for c in chords_sorted), default=0.0)
-    total_sec_rel = max(0.0, total_sec - start_time_s)
-    total_quarters = total_sec_rel / sec_per_q if sec_per_q > 0 else 0.0
-    measures_count = max(1, int(math.ceil(total_quarters / measure_quarters - 1e-9)))
+    onsets = None
+    if onset_times_s:
+        onsets = sorted({float(t) for t in onset_times_s})
 
     part = m21stream.Part()
     part.insert(0, m21instrument.AcousticGuitar())
@@ -115,19 +116,44 @@ def export_chords_midi(
             return seg.label or "N"
         return "N"
 
-    for mi in range(measures_count):
-        m = m21stream.Measure(number=mi + 1)
-        for b in range(num):
-            t_q = float(mi) * measure_quarters + float(b) * beat_quarters
-            t_sec = start_time_s + t_q * sec_per_q
-            lbl = label_at(t_sec)
+    if onsets is not None and len(onsets) > 0:
+        shift_s = -float(start_time_s) if start_time_s < 0 else 0.0
+        for i, t in enumerate(onsets):
+            t_rel = float(t) + float(shift_s)
+            if t_rel < 0:
+                continue
+            if i + 1 < len(onsets):
+                dur_s = max(0.05, float(onsets[i + 1]) - float(t))
+            else:
+                dur_s = max(0.05, float(beat_quarters) * float(sec_per_q))
+            offset_q = t_rel / sec_per_q if sec_per_q > 0 else 0.0
+            dur_q = dur_s / sec_per_q if sec_per_q > 0 else float(beat_quarters)
+            lbl = label_at(float(t))
             pitches = _pitches_for_label(lbl, root_octave=int(root_octave))
             if not pitches:
-                obj = m21note.Rest(quarterLength=float(beat_quarters))
+                obj = m21note.Rest(quarterLength=float(dur_q))
             else:
-                obj = m21chord.Chord(pitches, quarterLength=float(beat_quarters))
-            m.append(obj)
-        part.append(m)
+                obj = m21chord.Chord(pitches, quarterLength=float(dur_q))
+            part.insert(float(offset_q), obj)
+    else:
+        total_sec = max((float(c.end) for c in chords_sorted), default=0.0)
+        total_sec_rel = max(0.0, total_sec - start_time_s)
+        total_quarters = total_sec_rel / sec_per_q if sec_per_q > 0 else 0.0
+        measures_count = max(1, int(math.ceil(total_quarters / measure_quarters - 1e-9)))
+
+        for mi in range(measures_count):
+            m = m21stream.Measure(number=mi + 1)
+            for b in range(num):
+                t_q = float(mi) * measure_quarters + float(b) * beat_quarters
+                t_sec = start_time_s + t_q * sec_per_q
+                lbl = label_at(t_sec)
+                pitches = _pitches_for_label(lbl, root_octave=int(root_octave))
+                if not pitches:
+                    obj = m21note.Rest(quarterLength=float(beat_quarters))
+                else:
+                    obj = m21chord.Chord(pitches, quarterLength=float(beat_quarters))
+                m.append(obj)
+            part.append(m)
 
     score = m21stream.Score()
     score.metadata = None

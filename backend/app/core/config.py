@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     BASIC_PITCH_FRAME_THRESHOLD: float = 0.3
     BASIC_PITCH_MIN_NOTE_MS: float = 127.70
     BASIC_PITCH_HOP_SEC: float = 0.05
+    TRANSCRIPTION_MODE: str = "accompaniment"  # notes|accompaniment
 
     # majmin: triads only
     # majmin7: triads + dominant7 + minor7 (no maj7; avoids overfitting to melody tones)

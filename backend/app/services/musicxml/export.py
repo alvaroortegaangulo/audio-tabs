@@ -268,6 +268,8 @@ def export_musicxml(
     chords: List[Segment] | None = None,
     beat_times: np.ndarray | None = None,
     pickup_quarters: float = 0.0,
+    slash_notation: bool = False,
+    tab_positions: list[list[list[tuple[int, int]]]] | None = None,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -436,9 +438,12 @@ def export_musicxml(
 
         # --- Tab Staff Measure ---
         m_tab = m21stream.Measure(number=int(meas.number))
+        measure_positions = None
+        if tab_positions is not None and i < len(tab_positions):
+            measure_positions = tab_positions[i]
 
         offset_ql = 0.0
-        for item in meas.items:
+        for item_idx, item in enumerate(meas.items):
             tuplet = None
             if item.tuplet is not None:
                 tuplet = (int(item.tuplet.num_notes), int(item.tuplet.notes_occupied))
@@ -454,19 +459,24 @@ def export_musicxml(
                 pitches_str = [_vf_key_to_m21_pitch(k) for k in item.keys]
 
                 # --- Standard Notation Object ---
-                # We need to transpose pitches up by an octave for standard guitar notation
-                written_pitches = []
-                for p_str in pitches_str:
-                    p = m21pitch.Pitch(p_str)
-                    p.transpose(transpose_interval, inPlace=True)
-                    written_pitches.append(p)
-
-                if len(written_pitches) == 1:
-                    obj_not = m21note.Note(written_pitches[0])
+                if slash_notation:
+                    obj_not = m21note.Note("C4")
                     obj_not.duration = dur
+                    obj_not.notehead = "slash"
                 else:
-                    obj_not = m21chord.Chord(written_pitches)
-                    obj_not.duration = dur
+                    # We need to transpose pitches up by an octave for standard guitar notation
+                    written_pitches = []
+                    for p_str in pitches_str:
+                        p = m21pitch.Pitch(p_str)
+                        p.transpose(transpose_interval, inPlace=True)
+                        written_pitches.append(p)
+
+                    if len(written_pitches) == 1:
+                        obj_not = m21note.Note(written_pitches[0])
+                        obj_not.duration = dur
+                    else:
+                        obj_not = m21chord.Chord(written_pitches)
+                        obj_not.duration = dur
 
                 obj_tab = None
 
@@ -491,8 +501,13 @@ def export_musicxml(
                 # at the same offset so each <note> gets its own <technical>.
                 sounding_pitches = [m21pitch.Pitch(p_str) for p_str in pitches_str]
                 midi_notes = [int(p.midi) for p in sounding_pitches]
-                positions = _get_tab_positions_for_chord(midi_notes)
-
+                positions = None
+                if measure_positions is not None and item_idx < len(measure_positions):
+                    override = measure_positions[item_idx]
+                    if override and len(override) == len(sounding_pitches):
+                        positions = list(override)
+                if positions is None:
+                    positions = _get_tab_positions_for_chord(midi_notes)
                 if positions is None or len(positions) != len(sounding_pitches):
                     positions = [_get_preferred_tab_position(int(p.midi)) for p in sounding_pitches]
 
