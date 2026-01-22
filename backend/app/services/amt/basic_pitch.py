@@ -30,6 +30,42 @@ def _configure_omnizart_env() -> None:
     os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
     try:
+        if not hasattr(np, "float"):
+            np.float = float  # type: ignore[attr-defined]
+        if not hasattr(np, "int"):
+            np.int = int  # type: ignore[attr-defined]
+        if not hasattr(np, "complex"):
+            np.complex = complex  # type: ignore[attr-defined]
+        if not hasattr(np, "bool"):
+            np.bool = bool  # type: ignore[attr-defined]
+    except Exception:
+        pass
+
+    try:
+        import sys
+        import types
+
+        if "cv2" not in sys.modules:
+            try:
+                import cv2  # type: ignore  # noqa: F401
+            except Exception:
+                def _cv2_missing(*_args: object, **_kwargs: object) -> None:
+                    raise ImportError("cv2 is required for Omnizart CQT patch extraction.")
+
+                sys.modules["cv2"] = types.SimpleNamespace(resize=_cv2_missing, INTER_CUBIC=2)
+
+        if "vamp" not in sys.modules:
+            try:
+                import vamp  # type: ignore  # noqa: F401
+            except Exception:
+                def _vamp_missing(*_args: object, **_kwargs: object) -> None:
+                    raise ImportError("vamp is required for Omnizart chroma extraction.")
+
+                sys.modules["vamp"] = types.SimpleNamespace(collect=_vamp_missing)
+    except Exception:
+        pass
+
+    try:
         import tensorflow as tf  # type: ignore
 
         try:

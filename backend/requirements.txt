@@ -13,7 +13,11 @@ scipy==1.14.1
 soundfile==0.12.1
 librosa==0.10.2.post1
 madmom==0.16.1
-omnizart==0.1.0
+h5py==3.11.0
+pretty_midi==0.2.10
+PyYAML==6.0.3
+jsonschema==4.23.0
+tensorflow==2.15.0
 
 music21==9.3.0
 basic-pitch==0.4.0
