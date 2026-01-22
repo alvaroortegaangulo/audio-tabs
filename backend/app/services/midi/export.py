@@ -69,6 +69,7 @@ def export_chords_midi(
     tempo_bpm: float,
     time_signature: str = "4/4",
     root_octave: int = 3,
+    start_time_s: float = 0.0,
 ) -> None:
     """
     Create a simple MIDI file that plays block chords on each beat.
@@ -89,8 +90,10 @@ def export_chords_midi(
     sec_per_q = 60.0 / tempo
 
     chords_sorted = sorted(chords or [], key=lambda c: float(c.start))
+    start_time_s = float(start_time_s or 0.0)
     total_sec = max((float(c.end) for c in chords_sorted), default=0.0)
-    total_quarters = total_sec / sec_per_q if sec_per_q > 0 else 0.0
+    total_sec_rel = max(0.0, total_sec - start_time_s)
+    total_quarters = total_sec_rel / sec_per_q if sec_per_q > 0 else 0.0
     measures_count = max(1, int(math.ceil(total_quarters / measure_quarters - 1e-9)))
 
     part = m21stream.Part()
@@ -115,7 +118,7 @@ def export_chords_midi(
         m = m21stream.Measure(number=mi + 1)
         for b in range(num):
             t_q = float(mi) * measure_quarters + float(b) * beat_quarters
-            t_sec = t_q * sec_per_q
+            t_sec = start_time_s + t_q * sec_per_q
             lbl = label_at(t_sec)
             pitches = _pitches_for_label(lbl, root_octave=int(root_octave))
             if not pitches:
@@ -129,4 +132,3 @@ def export_chords_midi(
     score.metadata = None
     score.append(part)
     score.write("midi", fp=str(out_path))
-

@@ -73,10 +73,12 @@ class QuantizeResult:
 
 def _choose_grid_q(onsets_q: np.ndarray) -> tuple[float, Literal["straight", "triplet"]]:
     if onsets_q.size == 0:
-        return 0.25, "straight"
+        return 0.5, "straight"
 
     candidates: list[tuple[float, Literal["straight", "triplet"], float]] = [
-        (0.25, "straight", 1.0),  # 16th
+        (0.25, "straight", 1.15),  # 16th (penalize: often too noisy for AMT)
+        (0.5, "straight", 1.0),  # 8th
+        (1.0, "straight", 1.05),  # quarter (slight penalty: can oversimplify)
         (1.0 / 3.0, "triplet", 1.25),  # 8th-triplet grid (penalize slightly)
     ]
 
@@ -85,7 +87,11 @@ def _choose_grid_q(onsets_q: np.ndarray) -> tuple[float, Literal["straight", "tr
         qn = np.round(onsets_q / grid) * grid
         err = float(np.mean(np.abs(onsets_q - qn)))
         cost = err * penalty
-        if best is None or cost < best[0]:
+        if best is None or cost < best[0] - 1e-6:
+            best = (cost, grid, kind)
+            continue
+        # If costs are effectively tied, prefer a coarser grid for readability.
+        if best is not None and abs(cost - best[0]) <= 1e-6 and grid > best[1]:
             best = (cost, grid, kind)
 
     assert best is not None

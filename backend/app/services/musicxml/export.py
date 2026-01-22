@@ -18,6 +18,7 @@ from music21 import articulations as m21articulations
 from music21 import duration as m21duration
 from music21 import interval as m21interval
 from music21 import pitch as m21pitch
+from music21 import tie as m21tie
 
 from app.schemas import ScoreData
 from app.services.chords.template import Segment
@@ -133,6 +134,88 @@ def _get_preferred_tab_position(midi_note: int) -> tuple[int, int]:
 
     # Otherwise pick lowest fret available
     return min(candidates, key=lambda x: x[1])
+
+
+def _get_tab_positions_for_chord(midi_notes: list[int]) -> list[tuple[int, int]] | None:
+    """
+    Assigns (string, fret) for a set of MIDI notes attempting to avoid string collisions.
+
+    Returns positions aligned with midi_notes order, or None if no collision-free assignment
+    is found.
+    """
+    if not midi_notes:
+        return None
+
+    # Standard tuning: E2 A2 D3 G3 B3 E4
+    tuning: list[tuple[int, int]] = [(6, 40), (5, 45), (4, 50), (3, 55), (2, 59), (1, 64)]
+    max_fret = 24
+
+    def candidates_for(midi_note: int) -> list[tuple[int, int, float]]:
+        out: list[tuple[int, int, float]] = []
+        for string_num, open_pitch in tuning:
+            fret = int(midi_note) - int(open_pitch)
+            if 0 <= fret <= max_fret:
+                # Cost: prefer open/low positions, slightly penalize higher frets.
+                cost = float(fret)
+                if fret == 0:
+                    cost -= 0.75
+                if fret > 5:
+                    cost += 0.35 * float(fret - 5)
+                # Prefer using higher strings for higher pitches (soft bias)
+                cost += 0.02 * float(string_num)
+                out.append((int(string_num), int(fret), float(cost)))
+        out.sort(key=lambda t: t[2])
+        return out
+
+    cand_lists = [candidates_for(n) for n in midi_notes]
+    if any(len(c) == 0 for c in cand_lists):
+        return None
+
+    # Search with backtracking (chord sizes <= 6, candidate sizes small).
+    order = sorted(range(len(midi_notes)), key=lambda i: len(cand_lists[i]))
+
+    best_cost: float | None = None
+    best: list[tuple[int, int]] | None = None
+
+    used_strings: set[int] = set()
+    cur: list[tuple[int, int] | None] = [None] * len(midi_notes)
+
+    def finalize_cost(assign: list[tuple[int, int]]) -> float:
+        frets = [f for _s, f in assign]
+        non_zero = [f for f in frets if f > 0]
+        if non_zero:
+            span = max(frets) - min(non_zero)
+        else:
+            span = 0
+        max_f = max(frets) if frets else 0
+        strings = [s for s, _f in assign]
+        string_span = (max(strings) - min(strings)) if strings else 0
+        return float(span) * 1.75 + float(max(0, max_f - 7)) * 0.4 + float(string_span) * 0.15
+
+    def backtrack(k: int, base_cost: float) -> None:
+        nonlocal best_cost, best
+        if best_cost is not None and base_cost >= best_cost:
+            return
+        if k >= len(order):
+            assign = [c for c in cur if c is not None]  # type: ignore[assignment]
+            full = base_cost + finalize_cost(assign)  # type: ignore[arg-type]
+            if best_cost is None or full < best_cost:
+                best_cost = full
+                best = [c for c in cur if c is not None]  # type: ignore[assignment]
+            return
+
+        idx = order[k]
+        for s, f, c in cand_lists[idx]:
+            if s in used_strings:
+                continue
+            used_strings.add(s)
+            cur[idx] = (s, f)
+            backtrack(k + 1, base_cost + float(c))
+            cur[idx] = None
+            used_strings.remove(s)
+
+    backtrack(0, 0.0)
+    return best
 
 
 def _chord_label_to_figure(label: str) -> str | None:
@@ -373,16 +456,37 @@ def export_musicxml(
 
                 obj_tab = None
 
+                tie_obj = None
+                if item.tie is not None:
+                    try:
+                        tie_obj = m21tie.Tie(str(item.tie))
+                    except Exception:
+                        tie_obj = None
+
+                if tie_obj is not None:
+                    if isinstance(obj_not, m21note.Note):
+                        obj_not.tie = tie_obj
+                    elif isinstance(obj_not, m21chord.Chord):
+                        for n in obj_not.notes:
+                            n.tie = tie_obj
+
                 # --- Tab Notation Objects ---
                 # Use original (sounding) pitches to calculate fret positions.
                 # NOTE: music21 chord.Chord does not reliably export per-note
                 # technical indications (string/fret). Insert individual Notes
                 # at the same offset so each <note> gets its own <technical>.
                 sounding_pitches = [m21pitch.Pitch(p_str) for p_str in pitches_str]
-                for p in sounding_pitches:
+                midi_notes = [int(p.midi) for p in sounding_pitches]
+                positions = _get_tab_positions_for_chord(midi_notes)
+
+                if positions is None or len(positions) != len(sounding_pitches):
+                    positions = [_get_preferred_tab_position(int(p.midi)) for p in sounding_pitches]
+
+                for p, (s, f) in zip(sounding_pitches, positions):
                     n_tab = m21note.Note(p)
                     n_tab.duration = dur
-                    s, f = _get_preferred_tab_position(int(p.midi))
+                    if tie_obj is not None:
+                        n_tab.tie = tie_obj
                     if s > 0:
                         n_tab.articulations.append(m21articulations.StringIndication(int(s)))
                         n_tab.articulations.append(m21articulations.FretIndication(int(f)))

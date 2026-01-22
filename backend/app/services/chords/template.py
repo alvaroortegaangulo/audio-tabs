@@ -26,7 +26,16 @@ def _templates(vocab: str, *, alpha: float = NON_CHORD_TONE_PENALTY) -> List[Tup
             "maj": [0, 4, 7],
             "min": [0, 3, 7],
         }
-    elif vocab in ("majmin7", "majmin7plus"):
+    elif vocab == "majmin7":
+        # Keep the vocabulary conservative: maj7 is a common false-positive when a melody
+        # hits the major-7th over a plain major triad.
+        types = {
+            "maj": [0, 4, 7],
+            "min": [0, 3, 7],
+            "7": [0, 4, 7, 10],
+            "min7": [0, 3, 7, 10],
+        }
+    elif vocab == "majmin7plus":
         types = {
             "maj": [0, 4, 7],
             "min": [0, 3, 7],

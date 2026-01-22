@@ -24,7 +24,10 @@ class Settings(BaseSettings):
     BASIC_PITCH_MIN_NOTE_MS: float = 127.70
     BASIC_PITCH_HOP_SEC: float = 0.05
 
-    CHORD_VOCAB: str = "majmin7plus"  # majmin|majmin7|majmin7plus
+    # majmin: triads only
+    # majmin7: triads + dominant7 + minor7 (no maj7; avoids overfitting to melody tones)
+    # majmin7plus: adds maj7 (more complex, more false positives on pop/rock)
+    CHORD_VOCAB: str = "majmin7"  # majmin|majmin7|majmin7plus
     SWITCH_PENALTY: float = 2.5
     MIN_SEGMENT_SEC: float = 0.25
 

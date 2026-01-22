@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Iterable
 
@@ -243,6 +244,92 @@ def _filter_note_events(
     return out
 
 
+def _tempo_from_beat_times(beat_times: np.ndarray | None) -> float:
+    if beat_times is None or len(beat_times) < 2:
+        return 0.0
+    diffs = np.diff(np.asarray(beat_times, dtype=np.float64))
+    diffs = diffs[np.isfinite(diffs) & (diffs > 0)]
+    if diffs.size == 0:
+        return 0.0
+    # Median is more robust than mean when beat_track jitters.
+    return float(60.0 / float(np.median(diffs)))
+
+
+def _score_complexity_cost(score: ScoreData) -> float:
+    """
+    Heuristic to choose a beat grid that yields more readable notation.
+    Lower is better.
+    """
+    items = [it for m in (score.measures or []) for it in (m.items or [])]
+    if not items:
+        return 1e9
+
+    n_items = float(len(items))
+    n_measures = float(len(score.measures or []))
+    n_short = float(sum(1 for it in items if str(it.duration) in ("16", "32")))
+    n_ties = float(sum(1 for it in items if it.tie))
+    non_rest = [it for it in items if not it.rest]
+    avg_poly = float(np.mean([len(it.keys or []) for it in non_rest])) if non_rest else 0.0
+
+    # Bias toward ~4-8 measures for short clips; avoid excessive fragmentation.
+    return (
+        n_items
+        + 0.85 * n_short
+        + 0.25 * n_ties
+        + 0.35 * avg_poly
+        + 0.6 * abs(n_measures - 6.0)
+    )
+
+
+def _pick_best_beat_times(
+    note_events: list[NoteEvent],
+    beat_times: np.ndarray | None,
+    *,
+    time_signature: str,
+) -> np.ndarray | None:
+    if beat_times is None or len(beat_times) < 2 or not note_events:
+        return beat_times
+
+    beats = np.asarray(beat_times, dtype=np.float32)
+    beats = beats[np.isfinite(beats)]
+    if beats.size < 2:
+        return beat_times
+
+    # Keep selection fast on long jobs.
+    events = sorted(note_events, key=lambda e: float(e.start_time_s))
+    if len(events) > 600:
+        # Bias toward higher-confidence events but keep temporal ordering.
+        top = sorted(events, key=lambda e: float(e.amplitude), reverse=True)[:600]
+        events = sorted(top, key=lambda e: float(e.start_time_s))
+
+    candidates: list[np.ndarray] = [beats]
+    if beats.size >= 4:
+        candidates.append(beats[::2])
+        candidates.append(beats[1::2])
+
+    best_cost = None
+    best = beats
+    for cand in candidates:
+        if cand.size < 2:
+            continue
+        try:
+            q = quantize_note_events_to_score(
+                events,
+                tempo_bpm=120.0,  # ignored when beat_times is provided
+                beat_times=cand,
+                time_signature=time_signature,
+            )
+            cost = float(_score_complexity_cost(q.score))
+        except Exception:
+            continue
+
+        if best_cost is None or cost < best_cost:
+            best_cost = cost
+            best = cand
+
+    return best.astype(np.float32)
+
+
 def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     work = job_dir / "work"
     out = job_dir / "out"
@@ -267,26 +354,15 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         y_harm = y
         harmonic_path = wav_path
 
-    tempo_bpm, _beat_times = estimate_beats_librosa(y, sr)
-    if not tempo_bpm or tempo_bpm <= 0:
-        tempo_bpm = 120.0
-    # Librosa a veces devuelve double-time; normaliza a un rango más musical.
-    while tempo_bpm >= 200.0:
-        tempo_bpm /= 2.0
-    if tempo_bpm > 130.0:
-        half = tempo_bpm / 2.0
-        if 55.0 <= half <= 110.0:
-            tempo_bpm = half
-    while tempo_bpm < 50.0:
-        tempo_bpm *= 2.0
-
     time_sig = "4/4"
+    tempo_raw, beat_times_raw = estimate_beats_librosa(y, sr)
+    tempo_for_bp = float(tempo_raw) if tempo_raw and tempo_raw > 0 else 120.0
 
     # --- 1. Basic Pitch Transcription ---
     try:
         midi_data, note_events = transcribe_basic_pitch(
             harmonic_path,
-            midi_tempo=float(tempo_bpm),
+            midi_tempo=float(tempo_for_bp),
             onset_threshold=float(settings.BASIC_PITCH_ONSET_THRESHOLD),
             frame_threshold=float(settings.BASIC_PITCH_FRAME_THRESHOLD),
             minimum_note_length_ms=float(settings.BASIC_PITCH_MIN_NOTE_MS),
@@ -296,6 +372,14 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         print(f"Error executing basic_pitch: {e}")
         note_events = []
         midi_data = None
+
+    # Decide whether to keep beats as-is (double-time) or halved (half-time) based on
+    # readability of the quantized score. This keeps `tempo_bpm`, `beat_times`, and
+    # downstream exports consistent.
+    _beat_times = _pick_best_beat_times(note_events, beat_times_raw, time_signature=time_sig)
+    tempo_bpm = _tempo_from_beat_times(_beat_times)
+    if not tempo_bpm or tempo_bpm <= 0:
+        tempo_bpm = float(tempo_for_bp)
 
     # --- 2. Chord Detection ---
     chroma, _times, chords = extract_chords_template(
@@ -356,7 +440,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         note_events = _limit_onset_polyphony(
             note_events,
             max_notes=6,
-            onset_window_s=0.03,
+            onset_window_s=0.06,
         )
 
     # --- 3. Quantization to ScoreData ---
@@ -391,24 +475,26 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
         root_octave=3,
+        start_time_s=float(_beat_times[0]) if _beat_times is not None and len(_beat_times) > 0 else 0.0,
     )
 
     # PDF (LilyPond) generation - kept as fallback/supplement
     # Ideally LilyPond service should also be updated to support full score,
     # but for now we focus on MusicXML/OSMD as requested.
     pdf_error = None
-    try:
-        ly = build_lilypond_score(
-            spelled_chords,
-            tempo_bpm=float(tempo_bpm),
-            time_signature=time_sig,
-            key_tonic=(key_sig.tonic if key_sig else None),
-            key_mode=(key_sig.mode if key_sig else "major"),
-            title=title,
-        )
-        render_lilypond_pdf(ly, out, basename="score")
-    except Exception as e:
-        pdf_error = f"No se pudo generar PDF (LilyPond): {e}"
+    if shutil.which("lilypond") is not None:
+        try:
+            ly = build_lilypond_score(
+                spelled_chords,
+                tempo_bpm=float(tempo_bpm),
+                time_signature=time_sig,
+                key_tonic=(key_sig.tonic if key_sig else None),
+                key_mode=(key_sig.mode if key_sig else "major"),
+                title=title,
+            )
+            render_lilypond_pdf(ly, out, basename="score")
+        except Exception as e:
+            pdf_error = f"No se pudo generar PDF (LilyPond): {e}"
 
     return JobResult(
         job_id=job_dir.name,
