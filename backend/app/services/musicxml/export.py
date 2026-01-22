@@ -99,11 +99,13 @@ def _get_preferred_tab_position(midi_note: int) -> tuple[int, int]:
     """
     tuning = [(6, 40), (5, 45), (4, 50), (3, 55), (2, 59), (1, 64)]
 
+    max_fret = 24  # cover up to E6 on a 24-fret guitar
+
     candidates = []
     for string_num, open_pitch in tuning:
         fret = midi_note - open_pitch
-        if 0 <= fret <= 19:  # Assuming 19 frets max for standard view
-            candidates.append((string_num, fret))
+        if 0 <= fret <= max_fret:
+            candidates.append((string_num, int(fret)))
 
     if not candidates:
         # Fallback for very high/low notes not covered (unlikely for guitar range)
@@ -130,6 +132,44 @@ def _get_preferred_tab_position(midi_note: int) -> tuple[int, int]:
 
     # Otherwise pick lowest fret available
     return min(candidates, key=lambda x: x[1])
+
+
+def _chord_label_to_figure(label: str) -> str | None:
+    """
+    Convert internal labels like "A:min7" into a standard chord figure that
+    music21 can parse (and export) into valid MusicXML <harmony> kinds.
+    """
+    if not label or label == "N":
+        return None
+
+    if ":" in label:
+        root, qual = label.split(":", 1)
+        root = root.strip()
+        qual = qual.strip().lower()
+    else:
+        root, qual = label.strip(), "maj"
+
+    if not root:
+        return None
+
+    # music21 prefers flats as "-" (e.g. "B-"), but also parses common "b".
+    # Use "-" to be safe for MusicXML export.
+    root_m21 = root.replace("b", "-")
+
+    if qual in ("maj", ""):
+        suffix = ""
+    elif qual in ("min", "m"):
+        suffix = "m"
+    elif qual == "7":
+        suffix = "7"
+    elif qual in ("min7", "m7"):
+        suffix = "m7"
+    elif qual in ("maj7",):
+        suffix = "maj7"
+    else:
+        suffix = ""
+
+    return f"{root_m21}{suffix}"
 
 
 def export_musicxml(
@@ -254,27 +294,23 @@ def export_musicxml(
         measure_chords = get_chords_for_measure(i)
         for offset, label in measure_chords:
             try:
-                if ":" in label:
-                    root_str, kind_str = label.split(":")
-                    if kind_str == "7": kind_str = "dominant"
-                    h = m21harmony.ChordSymbol(root=root_str, kind=kind_str)
-                    m_not.insert(offset, h)
-                else:
-                    # Handle "N" or simple labels
-                    if label != "N":
-                        h = m21harmony.ChordSymbol(root=label)
-                        m_not.insert(offset, h)
+                fig = _chord_label_to_figure(str(label))
+                if fig:
+                    h = m21harmony.ChordSymbol(fig)
+                    m_not.insert(float(offset), h)
             except Exception:
                 pass
 
         # --- Tab Staff Measure ---
         m_tab = m21stream.Measure(number=int(meas.number))
 
+        offset_ql = 0.0
         for item in meas.items:
             tuplet = None
             if item.tuplet is not None:
                 tuplet = (int(item.tuplet.num_notes), int(item.tuplet.notes_occupied))
             dur = _m21_duration(item.duration, int(item.dots), tuplet)
+            dur_ql = float(dur.quarterLength)
 
             if item.rest or not item.keys:
                 obj_not = m21note.Rest()
@@ -299,30 +335,28 @@ def export_musicxml(
                     obj_not = m21chord.Chord(written_pitches)
                     obj_not.duration = dur
 
-                # --- Tab Notation Object ---
-                # Use original (sounding) pitches to calculate fret positions
+                obj_tab = None
+
+                # --- Tab Notation Objects ---
+                # Use original (sounding) pitches to calculate fret positions.
+                # NOTE: music21 chord.Chord does not reliably export per-note
+                # technical indications (string/fret). Insert individual Notes
+                # at the same offset so each <note> gets its own <technical>.
                 sounding_pitches = [m21pitch.Pitch(p_str) for p_str in pitches_str]
-
-                if len(sounding_pitches) == 1:
-                    p = sounding_pitches[0]
-                    obj_tab = m21note.Note(p)
-                    obj_tab.duration = dur
-                    s, f = _get_preferred_tab_position(p.midi)
+                for p in sounding_pitches:
+                    n_tab = m21note.Note(p)
+                    n_tab.duration = dur
+                    s, f = _get_preferred_tab_position(int(p.midi))
                     if s > 0:
-                        obj_tab.articulations.append(m21articulations.StringIndication(s))
-                        obj_tab.articulations.append(m21articulations.FretIndication(f))
-                else:
-                    # Tab Chord
-                    obj_tab = m21chord.Chord(sounding_pitches)
-                    obj_tab.duration = dur
-                    for cn in obj_tab.notes:
-                        s, f = _get_preferred_tab_position(cn.pitch.midi)
-                        if s > 0:
-                            cn.articulations.append(m21articulations.StringIndication(s))
-                            cn.articulations.append(m21articulations.FretIndication(f))
+                        n_tab.articulations.append(m21articulations.StringIndication(int(s)))
+                        n_tab.articulations.append(m21articulations.FretIndication(int(f)))
+                    m_tab.insert(float(offset_ql), n_tab)
 
-            m_not.append(obj_not)
-            m_tab.append(obj_tab)
+            m_not.insert(float(offset_ql), obj_not)
+            if obj_tab is not None:
+                m_tab.insert(float(offset_ql), obj_tab)
+
+            offset_ql += dur_ql
 
         part_notation.append(m_not)
         part_tab.append(m_tab)
