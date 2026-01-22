@@ -336,9 +336,9 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
 
         amps = np.asarray([float(ev.amplitude) for ev in note_events], dtype=np.float32)
         if amps.size > 0:
-            min_amp = max(0.2, float(np.percentile(amps, 35)))
+            min_amp = max(0.1, float(np.percentile(amps, 20)))
         else:
-            min_amp = 0.2
+            min_amp = 0.1
 
         sec_per_q = 60.0 / float(tempo_bpm if tempo_bpm else 120.0)
         min_dur_s = max(0.08, 0.2 * sec_per_q)
@@ -350,7 +350,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             min_dur_s=min_dur_s,
             min_pitch=40,
             max_pitch=88,
-            chord_tone_bias=0.15,
+            chord_tone_bias=0.05,
         )
         note_events = _limit_onset_polyphony(
             note_events,

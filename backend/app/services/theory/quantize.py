@@ -71,56 +71,51 @@ class QuantizeResult:
     key_signature: KeySignature | None
 
 
-def _choose_grid_q(onsets_q: np.ndarray) -> tuple[float, Literal["straight", "triplet"]]:
-    if onsets_q.size == 0:
-        return 0.25, "straight"
+# Mapping of duration in 16ths (steps) to (duration_str, dots)
+_DUR_LOOKUP: dict[int, list[tuple[str, int]]] = {
+    1: [("16", 0)],
+    2: [("8", 0)],
+    3: [("8", 1)],
+    4: [("q", 0)],
+    6: [("q", 1)],
+    7: [("q", 2)], # Double dot is sometimes supported, but let's stick to simple
+    8: [("h", 0)],
+    12: [("h", 1)],
+    16: [("w", 0)],
+}
 
-    candidates: list[tuple[float, Literal["straight", "triplet"], float]] = [
-        (0.25, "straight", 1.0),  # 16th
-        (1.0 / 3.0, "triplet", 1.25),  # 8th-triplet grid (penalize slightly)
+def decompose_steps_straight(steps: int) -> list[tuple[str, int]]:
+    """
+    Decomposes a duration (in 16th steps) into a list of tied notes.
+    """
+    if steps <= 0:
+        return []
+
+    # Try direct lookup first
+    if steps in _DUR_LOOKUP:
+        return _DUR_LOOKUP[steps]
+
+    # Otherwise greedy decomposition
+    # Standard units in descending order of size (steps)
+    units = [
+        (16, "w", 0),
+        (12, "h", 1),
+        (8, "h", 0),
+        (6, "q", 1),
+        (4, "q", 0),
+        (3, "8", 1),
+        (2, "8", 0),
+        (1, "16", 0)
     ]
 
-    best = None
-    for grid, kind, penalty in candidates:
-        qn = np.round(onsets_q / grid) * grid
-        err = float(np.mean(np.abs(onsets_q - qn)))
-        cost = err * penalty
-        if best is None or cost < best[0]:
-            best = (cost, grid, kind)
-
-    assert best is not None
-    return float(best[1]), best[2]
-
-
-_DUR_TOKENS_STRAIGHT: list[tuple[str, int, float]] = [
-    ("w", 0, 4.0),
-    ("h", 1, 3.0),
-    ("h", 0, 2.0),
-    ("q", 1, 1.5),
-    ("q", 0, 1.0),
-    ("8", 1, 0.75),
-    ("8", 0, 0.5),
-    ("16", 1, 0.375),
-    ("16", 0, 0.25),
-    ("32", 1, 0.1875),
-    ("32", 0, 0.125),
-]
-
-
-def _decompose_duration_straight(duration_q: float) -> list[tuple[str, int, float]]:
-    out: list[tuple[str, int, float]] = []
-    rem = float(duration_q)
-    eps = 1e-6
-
-    for dur, dots, ql in _DUR_TOKENS_STRAIGHT:
-        while rem + eps >= ql:
-            out.append((dur, dots, ql))
-            rem -= ql
-
-    if rem > 1e-3:
-        # Fallback: force a 32nd to avoid dropping time.
-        out.append(("32", 0, max(0.125, rem)))
-
+    out = []
+    rem = steps
+    for val, dur, dots in units:
+        while rem >= val:
+            out.append((dur, dots))
+            rem -= val
+            if rem == 0:
+                break
     return out
 
 
@@ -133,13 +128,13 @@ def quantize_note_events_to_score(
     tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
     sec_per_q = 60.0 / tempo
 
+    # Always use 16th note grid (0.25 beats) for stability
+    grid_q = 0.25
+    grid_kind = "straight"
+
     # Key detection (music21).
     key_sig = estimate_key_signature_music21(note_events)
     use_flats = bool(key_sig.use_flats) if key_sig else False
-
-    # Convert onsets to quarter units for grid selection.
-    onsets_q = np.asarray([ev.start_time_s / sec_per_q for ev in note_events], dtype=np.float32)
-    grid_q, grid_kind = _choose_grid_q(onsets_q)
 
     # Time signature parsing (default to 4/4).
     try:
@@ -149,7 +144,11 @@ def quantize_note_events_to_score(
     except Exception:
         num, den = 4, 4
 
+    # Measure length in quarters
     measure_q = float(num) * (4.0 / float(den))
+
+    # Steps per measure (16ths per measure)
+    # e.g. 4/4 -> 4 beats -> 16 steps
     steps_per_measure = int(round(measure_q / grid_q))
     if steps_per_measure <= 0:
         steps_per_measure = 16
@@ -165,6 +164,7 @@ def quantize_note_events_to_score(
         s_q = float(ev.start_time_s) / sec_per_q
         e_q = float(ev.end_time_s) / sec_per_q
 
+        # Snap to grid
         s = int(round(s_q / grid_q))
         e = int(round(e_q / grid_q))
         if e <= s:
@@ -175,21 +175,31 @@ def quantize_note_events_to_score(
         ends[e].append(pitch)
         last_step = max(last_step, e)
 
+    # Make sure we cover full measures
+    if last_step % steps_per_measure != 0:
+        last_step = ((last_step // steps_per_measure) + 1) * steps_per_measure
+
     # Sweep steps into compressed chord/rest events.
-    active: dict[int, int] = {}
+    active: dict[int, int] = {} # pitch -> count
     events: list[tuple[list[int], int]] = []  # (pitches, duration_steps)
+
     prev_pitches: list[int] | None = None
     prev_len = 0
 
     for step in range(0, last_step):
+        # Process ends first
         for p in ends.get(step, []):
             active[p] = active.get(p, 0) - 1
             if active[p] <= 0:
                 active.pop(p, None)
+
+        # Process starts
         for p in starts.get(step, []):
             active[p] = active.get(p, 0) + 1
 
         cur = sorted(active.keys())
+
+        # If this is the start
         if prev_pitches is None:
             prev_pitches = cur
             prev_len = 1
@@ -202,10 +212,11 @@ def quantize_note_events_to_score(
             prev_pitches = cur
             prev_len = 1
 
-    if prev_pitches is None:
-        events = [([], int(steps_per_measure))]
-    else:
+    if prev_pitches is not None:
         events.append((prev_pitches, prev_len))
+    else:
+         # Empty score
+         pass
 
     # Split events into measures and emit ScoreData.
     measures: list[ScoreMeasure] = []
@@ -219,7 +230,7 @@ def quantize_note_events_to_score(
         current_measure_items = []
         measure_number += 1
 
-    def emit_item(pitches: list[int], duration: str, dots: int, tuplet: TupletSpec | None, tie: str | None):
+    def emit_item(pitches: list[int], duration: str, dots: int, tie: str | None):
         keys = [_midi_to_vexflow_key(p, use_flats=use_flats) for p in pitches] if pitches else []
         current_measure_items.append(
             ScoreItem(
@@ -227,7 +238,7 @@ def quantize_note_events_to_score(
                 keys=keys,
                 duration=duration,
                 dots=dots,
-                tuplet=tuplet,
+                tuplet=None, # Tupletes disabled for stability
                 tie=tie,  # type: ignore[arg-type]
             )
         )
@@ -237,33 +248,56 @@ def quantize_note_events_to_score(
         while steps_left > 0:
             take = min(steps_left, remaining_steps)
 
-            dur_q = take * grid_q
-            if grid_kind == "triplet":
-                # Represent as 8th-notes in 3:2 tuplets (each = 1/3 quarter).
-                unit_steps = int(take)
-                tuplet = TupletSpec(num_notes=3, notes_occupied=2)
-                for i in range(unit_steps):
+            # Decompose 'take' steps into tied notes
+            parts = decompose_steps_straight(take)
+
+            for i, (dur, dots) in enumerate(parts):
+                tie = None
+                # Determine tie status
+                # If we are splitting 'take', we need internal ties
+                # AND if steps_left > take (crossing measure), we need to start a tie at the end
+
+                is_start_of_chain = (i == 0)
+                is_end_of_chain = (i == len(parts) - 1)
+
+                # Logic:
+                # If there are multiple parts, 0->start, mid->continue, last->stop/continue?
+                # Wait, 'take' is just the chunk fitting in THIS measure.
+                # If steps_left > take, we are crossing a measure, so the last part must TIE OUT.
+                # If we came from a previous block (how do we know?), we might need to TIE IN?
+                # Ah, 'events' loop iterates through contiguous blocks of same pitch.
+                # But we sliced 'events' based on pitch changes.
+                # So within one event iteration, it IS a single note (tied).
+
+                # Let's refine tie logic:
+                # The total note (dur_steps) is being split into potentially multiple measures (take)
+                # and multiple graphic notes (parts).
+
+                # We need to track if we are at the very beginning or very end of the *original* event.
+                # We are in a while loop `steps_left > 0`.
+                # Total duration is `dur_steps`.
+                # Steps processed so far = dur_steps - steps_left.
+
+                steps_processed = dur_steps - steps_left
+
+                # Check if this specific note part is the FIRST of the whole event
+                is_absolute_first = (steps_processed == 0) and is_start_of_chain
+                # Check if this specific note part is the LAST of the whole event
+                is_absolute_last = (steps_left == take) and is_end_of_chain
+
+                if len(pitches) > 0: # Only tie notes, not rests
+                    if is_absolute_first and is_absolute_last:
+                        tie = None
+                    elif is_absolute_first:
+                        tie = "start"
+                    elif is_absolute_last:
+                        tie = "stop"
+                    else:
+                        tie = "continue"
+                else:
                     tie = None
-                    if unit_steps > 1:
-                        if i == 0:
-                            tie = "start"
-                        elif i == unit_steps - 1:
-                            tie = "stop"
-                        else:
-                            tie = "continue"
-                    emit_item(pitches, duration="8", dots=0, tuplet=tuplet, tie=tie)
-            else:
-                parts = _decompose_duration_straight(dur_q)
-                for i, (dur, dots, _ql) in enumerate(parts):
-                    tie = None
-                    if len(parts) > 1:
-                        if i == 0:
-                            tie = "start"
-                        elif i == len(parts) - 1:
-                            tie = "stop"
-                        else:
-                            tie = "continue"
-                    emit_item(pitches, duration=dur, dots=dots, tuplet=None, tie=tie)
+
+                emit_item(pitches, duration=dur, dots=dots, tie=tie)
 
             steps_left -= take
             remaining_steps -= take
@@ -275,6 +309,5 @@ def quantize_note_events_to_score(
     if current_measure_items:
         flush_measure()
 
-    score = ScoreData(grid_q=float(grid_q), grid_kind=grid_kind, measures=measures)
+    score = ScoreData(grid_q=float(grid_q), grid_kind="straight", measures=measures)
     return QuantizeResult(score=score, key_signature=key_sig)
-
