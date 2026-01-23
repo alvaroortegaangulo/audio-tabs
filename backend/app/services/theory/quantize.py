@@ -7,6 +7,9 @@ import numpy as np
 
 from app.schemas import KeySignature, ScoreData, ScoreItem, ScoreMeasure, TupletSpec
 from app.services.amt.basic_pitch import NoteEvent
+from app.core.config import settings
+from app.services.guitar.fretboard import get_tuning
+from app.services.guitar.optimizer import optimize_tab_positions_for_events
 
 
 VF_NOTE_NAMES_SHARP = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"]
@@ -18,6 +21,22 @@ def _midi_to_vexflow_key(pitch_midi: int, *, use_flats: bool) -> str:
     octave = int(pitch_midi) // 12 - 1
     name = VF_NOTE_NAMES_FLAT[pc] if use_flats else VF_NOTE_NAMES_SHARP[pc]
     return f"{name}/{octave}"
+
+
+def _vf_key_to_midi(key: str) -> int | None:
+    try:
+        note, octave_s = key.split("/")
+        note = note.strip().lower()
+        octave = int(octave_s)
+        if note in VF_NOTE_NAMES_SHARP:
+            pc = VF_NOTE_NAMES_SHARP.index(note)
+        elif note in VF_NOTE_NAMES_FLAT:
+            pc = VF_NOTE_NAMES_FLAT.index(note)
+        else:
+            return None
+        return int((octave + 1) * 12 + int(pc))
+    except Exception:
+        return None
 
 
 def estimate_key_signature_music21(note_events: list[NoteEvent]) -> KeySignature | None:
@@ -69,6 +88,7 @@ class QuantizeResult:
     key_signature: KeySignature | None
     pickup_quarters: float = 0.0
     score_m21: object | None = None
+    tab_positions: list[list[list[tuple[int, int]]]] | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +156,37 @@ def _parse_time_signature(time_signature: str) -> tuple[int, int]:
         return 4, 4
 
 
+def _duration_to_quarters(item: ScoreItem) -> float:
+    base = None
+    for token in _DUR_TOKENS_ALL:
+        if token.duration == str(item.duration) and int(token.dots) == int(item.dots or 0):
+            base = float(token.ql)
+            break
+    if base is None:
+        base = {
+            "w": 4.0,
+            "h": 2.0,
+            "q": 1.0,
+            "8": 0.5,
+            "16": 0.25,
+            "32": 0.125,
+        }.get(str(item.duration), 0.0)
+
+    total = float(base)
+    dots = int(item.dots or 0)
+    for i in range(dots):
+        total += float(base) / float(2 ** (i + 1))
+
+    tuplet = getattr(item, "tuplet", None)
+    if tuplet is not None:
+        num = int(getattr(tuplet, "num_notes", 0) or 0)
+        occ = int(getattr(tuplet, "notes_occupied", 0) or 0)
+        if num > 0 and occ > 0:
+            total *= float(occ) / float(num)
+
+    return float(total)
+
+
 def _to_beats(times_s: np.ndarray, beat_times: np.ndarray) -> np.ndarray:
     beats = np.asarray(beat_times, dtype=np.float64)
     beats = beats[np.isfinite(beats)]
@@ -155,6 +206,31 @@ def _to_beats(times_s: np.ndarray, beat_times: np.ndarray) -> np.ndarray:
         res[mask_r] = indices[-1] + (times_s[mask_r] - beats[-1]) / avg_dur
 
     return res
+
+
+def _beats_to_seconds(beat_pos: float, beat_times: np.ndarray | None, tempo_bpm: float) -> float:
+    if beat_times is None or len(beat_times) < 2:
+        tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
+        sec_per_q = 60.0 / tempo
+        return float(beat_pos) * float(sec_per_q)
+
+    beats = np.asarray(beat_times, dtype=np.float64)
+    beats = beats[np.isfinite(beats)]
+    if beats.size < 2:
+        tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
+        sec_per_q = 60.0 / tempo
+        return float(beat_pos) * float(sec_per_q)
+
+    indices = np.arange(len(beats), dtype=np.float64)
+    avg_dur = float(np.mean(np.diff(beats))) if len(beats) > 1 else 0.5
+    if avg_dur <= 0:
+        avg_dur = 0.5
+    res = float(np.interp([float(beat_pos)], indices, beats, left=beats[0], right=beats[-1])[0])
+    if beat_pos < indices[0]:
+        res = float(beats[0]) + float(beat_pos) * float(avg_dur)
+    elif beat_pos > indices[-1]:
+        res = float(beats[-1]) + (float(beat_pos) - float(indices[-1])) * float(avg_dur)
+    return float(res)
 
 
 def _warp_note_events(
@@ -330,7 +406,7 @@ def quantize_note_events_to_score(
             items.append(ScoreItem(rest=True, keys=[], duration=token.duration, dots=token.dots))
         empty = ScoreMeasure(number=1, items=items)
         score = ScoreData(grid_q=1.0, grid_kind="straight", measures=[empty])
-        return QuantizeResult(score=score, key_signature=key_sig, pickup_quarters=0.0, score_m21=None)
+        return QuantizeResult(score=score, key_signature=key_sig, pickup_quarters=0.0, score_m21=None, tab_positions=None)
 
     gap_q = float(merge_gap_s)
     if beat_times is None or len(beat_times) <= 1:
@@ -453,9 +529,53 @@ def quantize_note_events_to_score(
     score_m21 = m21stream.Score()
     score_m21.insert(0, part)
 
+    tab_positions: list[list[list[tuple[int, int]]]] | None = None
+    try:
+        tuning = get_tuning(getattr(settings, "GUITAR_TUNING", "standard"))
+        events: list[tuple[float, list[int], str | None]] = []
+        item_refs: list[tuple[int, int]] = []
+        tab_positions = []
+        offset_q = 0.0
+        for m_idx, meas in enumerate(score.measures):
+            measure_positions: list[list[tuple[int, int]]] = []
+            for item_idx, item in enumerate(meas.items):
+                dur_q = _duration_to_quarters(item)
+                if item.rest or not item.keys:
+                    measure_positions.append([])
+                else:
+                    pitches: list[int] = []
+                    for key in item.keys:
+                        midi = _vf_key_to_midi(str(key))
+                        if midi is not None:
+                            pitches.append(int(midi))
+                    if pitches:
+                        t_q = float(offset_q) - float(pickup_quarters or 0.0)
+                        t_sec = _beats_to_seconds(t_q, beat_times, float(tempo_bpm))
+                        events.append((t_sec, pitches, None))
+                        item_refs.append((m_idx, item_idx))
+                    measure_positions.append([])
+                offset_q += float(dur_q)
+            tab_positions.append(measure_positions)
+
+        if events:
+            opt_res = optimize_tab_positions_for_events(
+                events,
+                tuning=tuning,
+                tempo_bpm=float(tempo_bpm),
+            )
+            for ev_idx, (m_idx, item_idx) in enumerate(item_refs):
+                if ev_idx >= len(opt_res.events):
+                    break
+                positions = [(p.string, p.fret) for p in opt_res.events[ev_idx].positions]
+                if positions and len(positions) == len(score.measures[m_idx].items[item_idx].keys):
+                    tab_positions[m_idx][item_idx] = positions
+    except Exception:
+        tab_positions = None
+
     return QuantizeResult(
         score=score,
         key_signature=key_sig,
         pickup_quarters=float(pickup_quarters),
         score_m21=score_m21,
+        tab_positions=tab_positions,
     )

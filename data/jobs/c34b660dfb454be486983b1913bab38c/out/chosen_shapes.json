@@ -1,0 +1,149 @@
+[
+  {
+    "start": -0.7900000214576721,
+    "end": 0.009999968111515045,
+    "label": "N",
+    "confidence": 0.12267506122589111,
+    "shape": null
+  },
+  {
+    "start": 0.009999990463256836,
+    "end": 1.6099999323487282,
+    "label": "G:maj",
+    "confidence": 0.08599565178155899,
+    "shape": {
+      "frets": [
+        3,
+        2,
+        0,
+        0,
+        0,
+        3
+      ],
+      "root": "G",
+      "quality": "maj",
+      "label": "G:maj",
+      "position": 2
+    }
+  },
+  {
+    "start": 1.6100000739097595,
+    "end": 3.2100000753998756,
+    "label": "D:maj",
+    "confidence": 0.08756330609321594,
+    "shape": {
+      "frets": [
+        -1,
+        -1,
+        0,
+        2,
+        3,
+        2
+      ],
+      "root": "D",
+      "quality": "maj",
+      "label": "D:maj",
+      "position": 2
+    }
+  },
+  {
+    "start": 3.209999978542328,
+    "end": 6.710000075399876,
+    "label": "A:min",
+    "confidence": 0.07245918363332748,
+    "shape": {
+      "frets": [
+        -1,
+        0,
+        2,
+        2,
+        1,
+        0
+      ],
+      "root": "A",
+      "quality": "min",
+      "label": "A:min",
+      "position": 1
+    }
+  },
+  {
+    "start": 6.709999978542328,
+    "end": 8.41000036150217,
+    "label": "G:maj",
+    "confidence": 0.08750800043344498,
+    "shape": {
+      "frets": [
+        3,
+        2,
+        0,
+        0,
+        0,
+        3
+      ],
+      "root": "G",
+      "quality": "maj",
+      "label": "G:maj",
+      "position": 2
+    }
+  },
+  {
+    "start": 8.409999787807465,
+    "end": 10.209999598562717,
+    "label": "D:maj",
+    "confidence": 0.08372112363576889,
+    "shape": {
+      "frets": [
+        -1,
+        -1,
+        0,
+        2,
+        3,
+        2
+      ],
+      "root": "D",
+      "quality": "maj",
+      "label": "D:maj",
+      "position": 2
+    }
+  },
+  {
+    "start": 10.209999978542328,
+    "end": 13.709999598562717,
+    "label": "C:maj",
+    "confidence": 0.08318708091974258,
+    "shape": {
+      "frets": [
+        -1,
+        3,
+        2,
+        0,
+        1,
+        0
+      ],
+      "root": "C",
+      "quality": "maj",
+      "label": "C:maj",
+      "position": 1
+    }
+  },
+  {
+    "start": 13.709999978542328,
+    "end": 14.610000170767307,
+    "label": "G:maj",
+    "confidence": 0.08666394650936127,
+    "shape": {
+      "frets": [
+        3,
+        2,
+        0,
+        0,
+        0,
+        3
+      ],
+      "root": "G",
+      "quality": "maj",
+      "label": "G:maj",
+      "position": 2
+    }
+  }
+]

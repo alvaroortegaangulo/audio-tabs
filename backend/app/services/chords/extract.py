@@ -5,7 +5,9 @@ from typing import List, Tuple
 
 import numpy as np
 
+from app.core.config import settings
 from app.schemas import ChordSegment
+from app.services.chords.deep_chords import extract_chords_deep
 from app.services.chords.template import (
     build_chord_library,
     emission_probs,
@@ -45,11 +47,11 @@ def _deep_chroma(
     sr: int | None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     try:
-        from madmom.features.chords import DeepChromaProcessor
+        from madmom.audio.chroma import DeepChromaProcessor
     except Exception as exc:
         raise RuntimeError("madmom is required for DeepChroma processing.") from exc
 
-    proc = DeepChromaProcessor(fps=_DEEPCHROMA_FPS)
+    proc = DeepChromaProcessor()
     chroma_frames = proc(_as_madmom_input(y_or_path, sr))
     chroma_frames = np.asarray(chroma_frames, dtype=np.float32)
     if chroma_frames.ndim != 2 or chroma_frames.shape[1] != 12:
@@ -60,7 +62,9 @@ def _deep_chroma(
     harm_rms = np.clip(harm_rms, 0.0, 1.0).astype(np.float32)
 
     chroma_norm = chroma_raw / (np.linalg.norm(chroma_raw, axis=0, keepdims=True) + 1e-9)
-    return chroma_norm.astype(np.float32), harm_rms, float(getattr(proc, "fps", _DEEPCHROMA_FPS))
+    # DeepChromaProcessor en madmom 0.16.1 usa fps=10 por defecto
+    fps = float(getattr(proc, "fps", _DEEPCHROMA_FPS))
+    return chroma_norm.astype(np.float32), harm_rms, fps
 
 
 def extract_chords_template(
@@ -79,6 +83,18 @@ def extract_chords_template(
 
     Returns: (chroma[12,frames], times[frames] seconds, segments[])
     """
+    backend = str(getattr(settings, "CHORD_DETECTION_BACKEND", "template") or "template").strip().lower()
+    if backend == "deep":
+        return extract_chords_deep(
+            y,
+            sr,
+            vocab=vocab,
+            switch_penalty=switch_penalty,
+            min_segment_sec=min_segment_sec,
+            hop_length=hop_length,
+            beat_times=beat_times,
+        )
+
     chroma, harm_rms, fps = _deep_chroma(y, sr)
     labels, T = build_chord_library(vocab)
     emissions = emission_probs(chroma, harm_rms, labels, T)

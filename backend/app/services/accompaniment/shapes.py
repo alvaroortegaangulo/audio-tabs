@@ -4,9 +4,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from app.services.theory.key import NOTE_TO_PC
-
-
-STANDARD_TUNING = (40, 45, 50, 55, 59, 64)  # E2 A2 D3 G3 B3 E4
+from app.services.guitar.fretboard import STANDARD_TUNING
 
 
 @dataclass(frozen=True)
@@ -40,6 +38,7 @@ _OPEN_SHAPES: dict[tuple[str, str], tuple[int, int, int, int, int, int]] = {
 def _parse_chord_label(label: str) -> tuple[str | None, str | None]:
     if not label or label == "N":
         return None, None
+    label = label.split("/", 1)[0].strip()
     if ":" in label:
         root, qual = label.split(":", 1)
         root = root.strip()
@@ -48,7 +47,8 @@ def _parse_chord_label(label: str) -> tuple[str | None, str | None]:
         root, qual = label.strip(), "maj"
     if not root:
         return None, None
-    if qual in ("min", "m", "min7", "m7", "dim"):
+    qual = qual.replace("(", "").replace(")", "").replace(" ", "")
+    if qual in ("min", "m", "min7", "m7", "dim", "min7b5", "m7b5", "hdim"):
         qual = "min"
     else:
         qual = "maj"

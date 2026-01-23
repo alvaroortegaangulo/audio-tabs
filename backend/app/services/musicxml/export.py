@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from typing import List
 
 import numpy as np
@@ -45,16 +46,23 @@ def _vf_key_to_m21_pitch(key: str) -> str:
 def _chord_label_to_figure(label: str) -> str | None:
     if not label or label == "N":
         return None
-    if ":" in label:
-        root, qual = label.split(":", 1)
+    main, bass = (label.split("/", 1) + [None])[:2] if "/" in label else (label, None)
+    if ":" in main:
+        root, qual = main.split(":", 1)
         root = root.strip()
         qual = qual.strip().lower()
     else:
-        root, qual = label.strip(), "maj"
+        match = re.match(r"^([A-Ga-g])([#b]?)(.*)$", main.strip())
+        if match:
+            root = f"{match.group(1).upper()}{match.group(2)}"
+            qual = (match.group(3) or "maj").strip().lower()
+        else:
+            root, qual = main.strip(), "maj"
     if not root:
         return None
     root_m21 = root.replace("b", "-")
-    if qual in ("maj", ""):
+    qual = qual.replace("(", "").replace(")", "").replace(" ", "")
+    if qual in ("maj", "", "major"):
         suffix = ""
     elif qual in ("min", "m"):
         suffix = "m"
@@ -64,9 +72,39 @@ def _chord_label_to_figure(label: str) -> str | None:
         suffix = "m7"
     elif qual in ("maj7",):
         suffix = "maj7"
+    elif qual in ("dim",):
+        suffix = "dim"
+    elif qual in ("dim7",):
+        suffix = "dim7"
+    elif qual in ("min7b5", "m7b5", "hdim"):
+        suffix = "m7b5"
+    elif qual in ("aug",):
+        suffix = "aug"
+    elif qual in ("sus2",):
+        suffix = "sus2"
+    elif qual in ("sus4", "sus"):
+        suffix = "sus4"
+    elif qual in ("9",):
+        suffix = "9"
+    elif qual in ("maj9",):
+        suffix = "maj9"
+    elif qual in ("min9", "m9"):
+        suffix = "m9"
+    elif qual in ("7b9",):
+        suffix = "7b9"
+    elif qual in ("7#9",):
+        suffix = "7#9"
     else:
         suffix = ""
-    return f"{root_m21}{suffix}"
+    fig = f"{root_m21}{suffix}"
+    if bass:
+        bass = bass.strip()
+        bass_match = re.match(r"^([A-Ga-g])([#b]?)(.*)$", bass)
+        bass_root = None
+        if bass_match:
+            bass_root = f"{bass_match.group(1).upper()}{bass_match.group(2)}".replace("b", "-")
+        fig = f"{fig}/{bass_root or bass}"
+    return fig
 
 
 def _time_to_beats(t_sec: float, beat_times: np.ndarray) -> float:

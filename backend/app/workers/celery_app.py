@@ -1,3 +1,6 @@
+# Monkey patch numpy ANTES de cualquier otro import
+import app.compat.numpy_compat  # noqa: F401
+
 from celery import Celery
 from app.core.config import settings
 

@@ -5,6 +5,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal, Optional
 
+import re
 import numpy as np
 from madmom.features.key import CNNKeyRecognitionProcessor, key_prediction_to_label
 
@@ -185,11 +186,17 @@ def spell_chord_label(label: str, use_flats: bool) -> str:
     if not label or label == "N":
         return label
 
-    if ":" in label:
-        root, qual = label.split(":", 1)
+    main, bass = (label.split("/", 1) + [None])[:2] if "/" in label else (label, None)
+    if ":" in main:
+        root, qual = main.split(":", 1)
         qual = qual.strip()
     else:
-        root, qual = label, ""
+        match = re.match(r"^([A-Ga-g])([#b]?)(.*)$", main.strip())
+        if match:
+            root = f"{match.group(1).upper()}{match.group(2)}"
+            qual = (match.group(3) or "").strip()
+        else:
+            root, qual = main, ""
 
     root = root.strip()
     pc = NOTE_TO_PC.get(root)
@@ -201,4 +208,17 @@ def spell_chord_label(label: str, use_flats: bool) -> str:
         return label
 
     spelled = NOTE_NAMES_FLAT[int(pc)] if use_flats else NOTE_NAMES_SHARP[int(pc)]
-    return f"{spelled}:{qual}" if qual else spelled
+    out = f"{spelled}:{qual}" if qual else spelled
+
+    if bass:
+        bass = bass.strip()
+        match = re.match(r"^([A-Ga-g])([#b]?)(.*)$", bass)
+        bass_note = None
+        if match:
+            bass_root = f"{match.group(1).upper()}{match.group(2)}"
+            bass_pc = NOTE_TO_PC.get(bass_root)
+            if bass_pc is not None:
+                bass_note = NOTE_NAMES_FLAT[int(bass_pc)] if use_flats else NOTE_NAMES_SHARP[int(bass_pc)]
+        out = f"{out}/{bass_note or bass}"
+
+    return out

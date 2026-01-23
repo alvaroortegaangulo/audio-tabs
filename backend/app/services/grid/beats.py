@@ -65,24 +65,18 @@ def estimate_beats_librosa(
     use_harmonic: bool = True,
 ) -> tuple[float, np.ndarray]:
     """
-    Beat and downbeat tracking via madmom RNN + DBN.
-    use_harmonic is kept for compatibility but ignored.
+    Beat tracking via madmom RNN + DBN.
+    use_harmonic is kept for compatibility but ignored by madmom.
     """
-    try:
-        from madmom.features.beats import RNNDownBeatProcessor, DBNDownBeatTrackingProcessor
-    except Exception as exc:
-        raise RuntimeError("madmom is required for beat tracking.") from exc
-
-    if use_harmonic:
-        # Madmom does its own internal preprocessing; ignore this flag.
-        pass
+    from madmom.features.beats import RNNBeatProcessor, DBNBeatTrackingProcessor
 
     input_data = _as_madmom_input(y, sr)
-    rnn = RNNDownBeatProcessor(fps=_FPS)
+    rnn = RNNBeatProcessor()
     activations = rnn(input_data)
 
-    dbn = DBNDownBeatTrackingProcessor(
-        beats_per_bar=_BEATS_PER_BAR,
+    dbn = DBNBeatTrackingProcessor(
+        min_bpm=55.0,
+        max_bpm=215.0,
         fps=_FPS,
     )
     beats = dbn(activations)
@@ -90,19 +84,8 @@ def estimate_beats_librosa(
     if beats is None or len(beats) == 0:
         return 0.0, np.asarray([], dtype=np.float32)
 
-    beats = np.asarray(beats, dtype=np.float32)
-    if beats.ndim == 1:
-        beat_times = beats
-        beat_positions = np.asarray([], dtype=np.float32)
-    else:
-        beat_times = beats[:, 0]
-        beat_positions = beats[:, 1]
-
+    beat_times = np.asarray(beats, dtype=np.float32)
     tempo = _estimate_tempo(beat_times)
-    meter = _infer_meter(beat_positions)
-    if meter:
-        _LOG.info("Detected meter: %s", meter)
-
     return float(tempo), beat_times.astype(np.float32)
 
 

@@ -1,4 +1,4 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
@@ -12,11 +12,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir numpy==1.26.4 Cython==0.29.37
 RUN pip install --no-cache-dir -r /app/requirements.txt
-RUN pip install --no-cache-dir --no-deps omnizart==0.1.0
 
-# Demucs/torch opcional: si quieres, descomenta en tu build real o usa requirements-demucs.txt.
-# COPY requirements-demucs.txt /app/requirements-demucs.txt
-# RUN pip install --no-cache-dir -r /app/requirements-demucs.txt
+# Parches para madmom: compatibilidad con Python 3.10+ y NumPy 1.20+
+COPY patch_madmom.py /tmp/patch_madmom.py
+RUN python3 /tmp/patch_madmom.py && rm /tmp/patch_madmom.py
+
+# Demucs/torch para separación de stems
+COPY requirements-demucs.txt /app/requirements-demucs.txt
+RUN pip install --no-cache-dir -r /app/requirements-demucs.txt
 
 COPY app /app/app
 

@@ -1,4 +1,8 @@
 from __future__ import annotations
+
+# Monkey patch numpy ANTES de cualquier otro import
+import app.compat.numpy_compat  # noqa: F401
+
 from pathlib import Path
 from celery.utils.log import get_task_logger
 

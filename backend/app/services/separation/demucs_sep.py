@@ -1,25 +1,66 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 import os
 
 import numpy as np
 import soundfile as sf
-import torch
-from demucs.apply import apply_model
-from demucs.audio import AudioFile
-from demucs.pretrained import get_model
 
-_DEFAULT_MODEL = "htdemucs_ft"
+# Optional imports for demucs/torch
+_DEMUCS_AVAILABLE = False
+try:
+    import torch
+    from demucs.apply import apply_model
+    from demucs.audio import AudioFile
+    from demucs.pretrained import get_model
+    _DEMUCS_AVAILABLE = True
+except ImportError:
+    torch = None  # type: ignore
+    apply_model = None  # type: ignore
+    AudioFile = None  # type: ignore
+    get_model = None  # type: ignore
+
+# Default model - htdemucs_6s includes dedicated guitar stem for better transcription
+_DEFAULT_MODEL = "htdemucs_6s"
 _SHIFTS = 2
 _OVERLAP = 0.25
 
+# Mapping of known models to their stem names
+_MODEL_STEMS: dict[str, list[str]] = {
+    "htdemucs": ["drums", "bass", "vocals", "other"],
+    "htdemucs_ft": ["drums", "bass", "vocals", "other"],
+    "htdemucs_6s": ["drums", "bass", "vocals", "guitar", "piano", "other"],
+    "mdx_extra": ["drums", "bass", "vocals", "other"],
+    "mdx_extra_q": ["drums", "bass", "vocals", "other"],
+}
+
+# Default stem priority for guitar transcription
+DEFAULT_STEM_PRIORITY = ("guitar", "other", "vocals")
+
+import logging
+_LOG = logging.getLogger(__name__)
+
+
+def get_model_stems(model_name: str) -> list[str]:
+    """Return the list of stems for a given model name."""
+    return _MODEL_STEMS.get(model_name, ["drums", "bass", "vocals", "other"])
+
 
 def _resolve_model(requested: str) -> str:
+    """Resolve and validate model name, with fallback to default."""
     req = (requested or "").strip()
     if not req or req.lower() == "auto":
         return _DEFAULT_MODEL
+
+    if req not in _MODEL_STEMS:
+        _LOG.warning(
+            "Unknown Demucs model '%s', using fallback '%s'. "
+            "Known models: %s",
+            req, _DEFAULT_MODEL, list(_MODEL_STEMS.keys())
+        )
+        return _DEFAULT_MODEL
+
     return req
 
 
@@ -63,18 +104,35 @@ def _stems_output_dir(out_dir: Path, model_name: str, input_wav: Path) -> Path:
     return out_dir / model_name / input_wav.stem
 
 
-def select_stem_path(stems_dir: Path, preference: Iterable[str] = ("other", "vocals")) -> Path:
+def select_stem_path(
+    stems_dir: Path,
+    preference: Iterable[str] = DEFAULT_STEM_PRIORITY,
+) -> Path:
+    """
+    Select the best available stem for transcription based on priority.
+
+    Args:
+        stems_dir: Directory containing stem WAV files
+        preference: Ordered list of stem names to try (first available wins)
+                   Default: ("guitar", "other", "vocals") for guitar transcription
+
+    Returns:
+        Path to the selected stem file
+    """
     for stem in preference:
         stem_name = f"{stem}.wav"
         p = stems_dir / stem_name
         if p.exists():
+            _LOG.info("Selected stem '%s' for transcription from %s", stem, stems_dir)
             return p
 
-    # Fallback: pick any stem that is not drums or bass.
+    # Fallback: pick any stem that is not drums or bass
     for p in stems_dir.glob("*.wav"):
         if p.stem not in ("drums", "bass"):
+            _LOG.info("Fallback: selected stem '%s' for transcription", p.stem)
             return p
-    raise FileNotFoundError("No usable stem found for transcription")
+
+    raise FileNotFoundError(f"No usable stem found for transcription in {stems_dir}")
 
 
 def get_stem_path(stems_dir: Path, stem: str) -> Path | None:
@@ -83,18 +141,33 @@ def get_stem_path(stems_dir: Path, stem: str) -> Path | None:
     return p if p.exists() else None
 
 
-def run_demucs_4stems(
+def run_demucs(
     input_wav: Path,
     out_dir: Path,
     model: str = _DEFAULT_MODEL,
     *,
-    stem_preference: Iterable[str] = ("other", "vocals"),
+    stem_preference: Iterable[str] = DEFAULT_STEM_PRIORITY,
     return_stem: bool = True,
 ) -> Path:
     """
-    Run Demucs via the Python API. Outputs stems to out_dir and returns the
-    selected stem (default: other/vocals) to avoid transcribing drums/bass.
+    Run Demucs stem separation via the Python API.
+
+    Supports both 4-stem models (htdemucs, htdemucs_ft) and 6-stem models
+    (htdemucs_6s). The 6-stem model includes dedicated guitar and piano stems.
+
+    Args:
+        input_wav: Path to input audio file
+        out_dir: Output directory for stems
+        model: Demucs model name (default: htdemucs_6s)
+        stem_preference: Priority order for stem selection (default: guitar, other, vocals)
+        return_stem: If True, return path to selected stem; if False, return stems directory
+
+    Returns:
+        Path to selected stem file (if return_stem=True) or stems directory
     """
+    if not _DEMUCS_AVAILABLE:
+        raise ImportError("torch and demucs are required for stem separation. Install with: pip install torch demucs")
+
     out_dir.mkdir(parents=True, exist_ok=True)
 
     model_name = _resolve_model(model)
@@ -137,6 +210,15 @@ def run_demucs_4stems(
         stem_path = stems_dir / f"{stem}.wav"
         _write_stem(stem_path, sources[idx], samplerate)
 
+    _LOG.info(
+        "Demucs separation complete: model=%s, stems=%s, output=%s",
+        model_name, stem_names, stems_dir
+    )
+
     if return_stem:
         return select_stem_path(stems_dir, stem_preference)
     return stems_dir
+
+
+# Alias for backwards compatibility
+run_demucs_4stems = run_demucs

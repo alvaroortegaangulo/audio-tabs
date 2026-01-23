@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,11 +23,33 @@ from app.services.theory.key import estimate_key_madmom, spell_chord_label, NOTE
 
 # Transcription & Export Imports
 from app.services.amt.basic_pitch import transcribe_basic_pitch, NoteEvent, save_note_events_csv
-from app.services.separation.demucs_sep import run_demucs_4stems, select_stem_path, get_stem_path
 from app.services.theory.quantize import quantize_note_events_to_score
+from app.services.theory.musical_postprocessor import (
+    remove_harmonic_duplicates,
+    merge_temporal_clusters,
+    apply_music_theory_rules,
+)
+
+# Optional demucs import
+try:
+    from app.services.separation.demucs_sep import run_demucs_4stems, select_stem_path, get_stem_path, _DEMUCS_AVAILABLE
+except ImportError:
+    _DEMUCS_AVAILABLE = False
+    run_demucs_4stems = None  # type: ignore
+    select_stem_path = None  # type: ignore
+    get_stem_path = None  # type: ignore
 from app.services.musicxml.export import export_musicxml
 from app.services.accompaniment.strum import detect_strum_onsets
-from app.services.accompaniment.shapes import pick_shape_for_chord, shape_pitches, shape_positions, shape_to_dict, Shape
+from app.services.accompaniment.shapes import (
+    pick_shape_for_chord,
+    shape_pitches,
+    shape_positions,
+    shape_to_dict,
+    Shape,
+)
+from app.services.guitar.fretboard import STANDARD_TUNING
+from app.services.analysis.content_classifier import analyze_musical_content, ContentSegment
+from app.services.analysis.audio_quality import analyze_audio_characteristics, calibrate_thresholds
 
 _CHORD_TONE_BIAS = 0.08
 _CHORD_CONFIDENCE_THRESHOLD = 0.03
@@ -36,6 +60,12 @@ _ACC_MIN_GRID_Q = 0.5
 _ACC_MIN_SEGMENT_SEC = 0.6
 _ACC_MIN_CONFIDENCE = 0.05
 _ACC_SWITCH_PENALTY = 4.0
+_TAB_MAX_FRET = 20
+_TAB_STRING_PENALTY = 0.35
+_TAB_FRET_PENALTY = 0.05
+_TAB_ANCHOR_PENALTY = 0.6
+
+_LOG = logging.getLogger(__name__)
 
 _VF_NOTE_NAMES_SHARP = ["c", "c#", "d", "d#", "e", "f", "f#", "g", "g#", "a", "a#", "b"]
 _VF_NOTE_NAMES_FLAT = ["c", "db", "d", "eb", "e", "f", "gb", "g", "ab", "a", "bb", "b"]
@@ -74,10 +104,21 @@ class _StrumEvent:
     pitches: list[int]
 
 
+@dataclass(frozen=True)
+class GuitarTranscriptionResult:
+    segments: list[ContentSegment]
+    note_events: list[NoteEvent]
+    chord_events: list[ChordSegment]
+    score_data: ScoreData
+    pickup_quarters: float
+    score_m21: object | None = None
+    tab_positions: list[list[list[tuple[int, int]]]] | None = None
+
+
 def _normalize_transcription_mode(mode: str | None) -> str:
-    mode = str(mode or "notes").strip().lower()
-    if mode not in ("notes", "accompaniment"):
-        return "notes"
+    mode = str(mode or "guitar").strip().lower()
+    if mode not in ("notes", "accompaniment", "guitar"):
+        return "guitar"
     return mode
 
 
@@ -435,37 +476,64 @@ def _chord_tone_pcs(label: str) -> set[int] | None:
     if not label or label == "N":
         return None
 
+    label = label.split("/", 1)[0].strip()
+    root = None
+    qual = ""
     if ":" in label:
         root, qual = label.split(":", 1)
-        root = root.strip()
-        qual = qual.strip().lower() or "maj"
     else:
-        root, qual = label.strip(), "maj"
+        match = re.match(r"^([A-Ga-g])([#b]?)(.*)$", label)
+        if match:
+            root = f"{match.group(1).upper()}{match.group(2)}"
+            qual = match.group(3) or ""
+    root = (root or "").strip()
+    qual = (qual or "").strip().lower().replace("(", "").replace(")", "").replace(" ", "")
 
     pc = NOTE_TO_PC.get(root)
     if pc is None:
         return None
 
-    if qual in ("maj", ""):
+    if qual in ("", "maj", "major"):
         intervals = [0, 4, 7]
-    elif qual in ("min", "m"):
+    elif qual in ("min", "m", "minor"):
         intervals = [0, 3, 7]
-    elif qual == "7":
-        intervals = [0, 4, 7, 10]
-    elif qual in ("min7", "m7"):
-        intervals = [0, 3, 7, 10]
-    elif qual == "maj7":
-        intervals = [0, 4, 7, 11]
-    elif qual == "dim":
+    elif "min7b5" in qual or "m7b5" in qual or "hdim" in qual:
         intervals = [0, 3, 6]
-    elif qual == "aug":
+    elif "dim" in qual:
+        intervals = [0, 3, 6]
+    elif "aug" in qual:
         intervals = [0, 4, 8]
-    elif qual == "sus2":
+    elif "sus2" in qual:
         intervals = [0, 2, 7]
-    elif qual == "sus4":
+    elif "sus4" in qual or "sus" in qual:
         intervals = [0, 5, 7]
     else:
         intervals = [0, 4, 7]
+
+    has_add9 = "add9" in qual
+    if "maj7" in qual or "maj9" in qual or "maj13" in qual:
+        intervals.append(11)
+    elif "dim7" in qual:
+        intervals.append(9)
+    elif "7" in qual or (("9" in qual or "11" in qual or "13" in qual) and not has_add9):
+        intervals.append(10)
+    elif "6" in qual:
+        intervals.append(9)
+
+    if "b9" in qual:
+        intervals.append(13)
+    if "#9" in qual:
+        intervals.append(15)
+    if "9" in qual and "b9" not in qual and "#9" not in qual:
+        intervals.append(14)
+    if "#11" in qual:
+        intervals.append(18)
+    elif "11" in qual:
+        intervals.append(17)
+    if "b13" in qual:
+        intervals.append(20)
+    elif "13" in qual:
+        intervals.append(21)
 
     return {int((pc + i) % 12) for i in intervals}
 
@@ -600,6 +668,66 @@ def _filter_note_events(
     return out
 
 
+def _post_process_note_events(
+    note_events: list[NoteEvent],
+    *,
+    chords: list[ChordSegment],
+    tempo_bpm: float,
+) -> list[NoteEvent]:
+    if not note_events:
+        return []
+
+    note_events = remove_harmonic_duplicates(note_events)
+    if not note_events:
+        return []
+
+    note_events = merge_temporal_clusters(
+        note_events,
+        window_ms=float(getattr(settings, "TEMPORAL_CLUSTER_WINDOW_MS", 80.0)),
+    )
+    if not note_events:
+        return []
+
+    note_events = _merge_overlapping_notes(note_events, gap_s=0.03)
+
+    amps = np.asarray([float(ev.amplitude) for ev in note_events], dtype=np.float32)
+    if amps.size > 0:
+        min_amp = max(0.2, float(np.percentile(amps, 35)))
+    else:
+        min_amp = 0.2
+
+    sec_per_q = 60.0 / float(tempo_bpm if tempo_bpm else 120.0)
+    min_dur_s = max(0.08, 0.2 * sec_per_q)
+
+    chord_conf_threshold = None
+    if chords:
+        confs = np.asarray([float(c.confidence) for c in chords], dtype=np.float32)
+        if confs.size > 0:
+            chord_conf_threshold = max(float(_CHORD_CONFIDENCE_THRESHOLD), float(np.median(confs)) * 0.9)
+
+    note_events = _filter_note_events(
+        note_events,
+        chords=chords,
+        min_amp=min_amp,
+        min_dur_s=min_dur_s,
+        min_pitch=40,
+        max_pitch=88,
+        chord_tone_bias=float(_CHORD_TONE_BIAS),
+        chord_confidence_threshold=chord_conf_threshold,
+    )
+    note_events = _limit_onset_polyphony(
+        note_events,
+        max_notes=6,
+        onset_window_s=0.06,
+    )
+    note_events = apply_music_theory_rules(
+        note_events,
+        chords=chords,
+        key_sig=None,
+    )
+    return note_events
+
+
 def _shift_note_events(note_events: Iterable[NoteEvent], offset_s: float) -> list[NoteEvent]:
     offset_s = float(offset_s or 0.0)
     if abs(offset_s) <= 1e-9:
@@ -635,22 +763,354 @@ def _shift_chords(chords: Iterable[ChordSegment], offset_s: float) -> list[Chord
     return out
 
 
+def _shift_content_segments(
+    segments: Iterable[ContentSegment],
+    offset_s: float,
+) -> list[ContentSegment]:
+    offset_s = float(offset_s or 0.0)
+    if abs(offset_s) <= 1e-9:
+        return list(segments)
+    out: list[ContentSegment] = []
+    for seg in segments:
+        out.append(
+            ContentSegment(
+                start_time_s=float(seg.start_time_s) - offset_s,
+                end_time_s=float(seg.end_time_s) - offset_s,
+                content_type=seg.content_type,
+                confidence=float(seg.confidence),
+                metrics=dict(seg.metrics or {}),
+            )
+        )
+    return out
+
+
+def _vf_key_to_midi(key: str) -> int | None:
+    try:
+        note, octave_s = key.split("/")
+        note = note.strip()
+        octave = int(octave_s)
+        if not note:
+            return None
+        note_name = note[0].upper() + note[1:]
+        pc = NOTE_TO_PC.get(note_name)
+        if pc is None:
+            return None
+        return int((octave + 1) * 12 + int(pc))
+    except Exception:
+        return None
+
+
+def _pitch_to_tab_positions(pitch_midi: int, *, max_fret: int = _TAB_MAX_FRET) -> list[tuple[int, int]]:
+    positions: list[tuple[int, int]] = []
+    for i, open_pitch in enumerate(STANDARD_TUNING):
+        fret = int(pitch_midi) - int(open_pitch)
+        if 0 <= fret <= int(max_fret):
+            string_num = 6 - int(i)
+            positions.append((int(string_num), int(fret)))
+    return positions
+
+
+def _tab_position_cost(
+    string_num: int,
+    fret: int,
+    *,
+    prev_pos: tuple[int, int] | None,
+    anchor_fret: float | None,
+) -> float:
+    cost = 0.0
+    if prev_pos is not None:
+        prev_string, prev_fret = prev_pos
+        cost += abs(int(fret) - int(prev_fret))
+        cost += float(_TAB_STRING_PENALTY) * abs(int(string_num) - int(prev_string))
+    if anchor_fret is not None:
+        cost += float(_TAB_ANCHOR_PENALTY) * abs(int(fret) - float(anchor_fret))
+    cost += float(_TAB_FRET_PENALTY) * float(fret)
+    return float(cost)
+
+
+def _select_tab_position(
+    pitch_midi: int,
+    *,
+    prev_pos: tuple[int, int] | None,
+    anchor_fret: float | None,
+) -> tuple[int, int] | None:
+    candidates = _pitch_to_tab_positions(pitch_midi)
+    if not candidates:
+        return None
+    return min(
+        candidates,
+        key=lambda p: _tab_position_cost(p[0], p[1], prev_pos=prev_pos, anchor_fret=anchor_fret),
+    )
+
+
+def _assign_chord_positions(
+    pitches: list[int],
+    *,
+    prev_pos: tuple[int, int] | None,
+    anchor_fret: float | None,
+) -> list[tuple[int, int]] | None:
+    if not pitches:
+        return None
+    pitches_sorted = sorted(pitches)
+    candidates: dict[int, list[tuple[int, int]]] = {
+        pitch: _pitch_to_tab_positions(pitch) for pitch in pitches_sorted
+    }
+    if any(not cand for cand in candidates.values()):
+        return None
+
+    best_cost: float | None = None
+    best_positions: list[tuple[int, int]] | None = None
+
+    def backtrack(
+        idx: int,
+        used_strings: set[int],
+        current: list[tuple[int, int]],
+        cost_so_far: float,
+    ) -> None:
+        nonlocal best_cost, best_positions
+        if idx >= len(pitches_sorted):
+            if best_cost is None or cost_so_far < best_cost:
+                best_cost = cost_so_far
+                best_positions = list(current)
+            return
+        if best_cost is not None and cost_so_far >= best_cost:
+            return
+
+        pitch = pitches_sorted[idx]
+        for string_num, fret in candidates[pitch]:
+            if string_num in used_strings:
+                continue
+            cost = _tab_position_cost(
+                string_num,
+                fret,
+                prev_pos=prev_pos,
+                anchor_fret=anchor_fret,
+            )
+            used_strings.add(string_num)
+            current.append((string_num, fret))
+            backtrack(idx + 1, used_strings, current, cost_so_far + cost)
+            current.pop()
+            used_strings.remove(string_num)
+
+    backtrack(0, set(), [], 0.0)
+    if best_positions is not None:
+        return best_positions
+
+    fallback: list[tuple[int, int]] = []
+    for pitch in pitches_sorted:
+        pos = _select_tab_position(pitch, prev_pos=prev_pos, anchor_fret=anchor_fret)
+        if pos is None:
+            return None
+        fallback.append(pos)
+    return fallback
+
+
+_DUR_QUARTERS = {
+    "w": 4.0,
+    "h": 2.0,
+    "q": 1.0,
+    "8": 0.5,
+    "16": 0.25,
+    "32": 0.125,
+}
+
+
+def _duration_to_quarters(item: ScoreItem) -> float:
+    base = _DUR_QUARTERS.get(str(item.duration))
+    if base is None:
+        return 0.0
+    total = float(base)
+    dots = int(item.dots or 0)
+    for i in range(dots):
+        total += float(base) / float(2 ** (i + 1))
+    tuplet = getattr(item, "tuplet", None)
+    if tuplet is not None:
+        num = int(getattr(tuplet, "num_notes", 0) or 0)
+        occ = int(getattr(tuplet, "notes_occupied", 0) or 0)
+        if num > 0 and occ > 0:
+            total *= float(occ) / float(num)
+    return float(total)
+
+
+def _beats_to_seconds(beat_pos: float, beat_times: np.ndarray | None, tempo_bpm: float) -> float:
+    if beat_times is None or len(beat_times) < 2:
+        tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
+        sec_per_q = 60.0 / tempo
+        return float(beat_pos) * float(sec_per_q)
+
+    beats = np.asarray(beat_times, dtype=np.float64)
+    beats = beats[np.isfinite(beats)]
+    if beats.size < 2:
+        tempo = float(tempo_bpm) if tempo_bpm and tempo_bpm > 0 else 120.0
+        sec_per_q = 60.0 / tempo
+        return float(beat_pos) * float(sec_per_q)
+
+    indices = np.arange(len(beats), dtype=np.float64)
+    avg_dur = float(np.mean(np.diff(beats))) if len(beats) > 1 else 0.5
+    if avg_dur <= 0:
+        avg_dur = 0.5
+    res = float(np.interp([float(beat_pos)], indices, beats, left=beats[0], right=beats[-1])[0])
+    if beat_pos < indices[0]:
+        res = float(beats[0]) + float(beat_pos) * float(avg_dur)
+    elif beat_pos > indices[-1]:
+        res = float(beats[-1]) + (float(beat_pos) - float(indices[-1])) * float(avg_dur)
+    return float(res)
+
+
+def _content_type_at_time(
+    t_sec: float,
+    segments: list[ContentSegment],
+    idx: int,
+) -> tuple[int, str]:
+    i = idx
+    while i < len(segments) and float(segments[i].end_time_s) <= t_sec:
+        i += 1
+    if i < len(segments):
+        seg = segments[i]
+        if float(seg.start_time_s) <= t_sec < float(seg.end_time_s):
+            return i, seg.content_type
+    return i, "hybrid"
+
+
+def _shape_positions_for_pitches(shape: Shape, pitches: list[int]) -> list[tuple[int, int]] | None:
+    if not pitches:
+        return None
+    shape_p = shape_pitches(shape)
+    shape_pos = shape_positions(shape)
+    if len(shape_p) != len(shape_pos):
+        return None
+
+    mapping: dict[int, list[tuple[int, int]]] = {}
+    for pitch, pos in zip(shape_p, shape_pos):
+        mapping.setdefault(int(pitch), []).append(pos)
+
+    positions: list[tuple[int, int]] = []
+    for pitch in pitches:
+        options = mapping.get(int(pitch))
+        if not options:
+            return None
+        positions.append(options.pop(0))
+    return positions
+
+
+def _build_tab_positions_for_guitar(
+    score: ScoreData,
+    *,
+    content_segments: list[ContentSegment],
+    chords: list[ChordSegment],
+    beat_times: np.ndarray | None,
+    tempo_bpm: float,
+    pickup_quarters: float,
+) -> list[list[list[tuple[int, int]]]]:
+    if not score.measures:
+        return []
+
+    segments_sorted = sorted(content_segments, key=lambda s: float(s.start_time_s))
+    segments_idx = 0
+    chord_shapes = _assign_shapes(chords)
+    chord_idx = 0
+
+    tab_positions: list[list[list[tuple[int, int]]]] = []
+    prev_pos: tuple[int, int] | None = None
+    offset_q = 0.0
+
+    for measure in score.measures:
+        measure_positions: list[list[tuple[int, int]]] = []
+        for item in measure.items:
+            dur_q = _duration_to_quarters(item)
+            t_q = float(offset_q) - float(pickup_quarters or 0.0)
+            t_sec = _beats_to_seconds(t_q, beat_times, tempo_bpm)
+
+            segments_idx, content_type = _content_type_at_time(t_sec, segments_sorted, segments_idx)
+            chord_idx, shape, _label = _shape_at_time(t_sec, chord_shapes, chord_idx)
+            anchor_fret = float(shape.position) if shape is not None else None
+
+            if item.rest or not item.keys:
+                measure_positions.append([])
+                offset_q += dur_q
+                continue
+
+            pitches: list[int] = []
+            for key in item.keys:
+                midi = _vf_key_to_midi(str(key))
+                if midi is not None:
+                    pitches.append(int(midi))
+            pitches = sorted(set(pitches))
+            if not pitches:
+                measure_positions.append([])
+                offset_q += dur_q
+                continue
+
+            positions: list[tuple[int, int]] | None = None
+            if content_type == "chordal":
+                if shape is not None:
+                    positions = _shape_positions_for_pitches(shape, pitches)
+                if positions is None:
+                    positions = _assign_chord_positions(pitches, prev_pos=prev_pos, anchor_fret=anchor_fret)
+            elif content_type == "hybrid":
+                if len(pitches) > 1 and shape is not None:
+                    positions = _shape_positions_for_pitches(shape, pitches)
+                if positions is None:
+                    if len(pitches) == 1:
+                        pos = _select_tab_position(pitches[0], prev_pos=prev_pos, anchor_fret=anchor_fret)
+                        positions = [pos] if pos is not None else None
+                    else:
+                        positions = _assign_chord_positions(pitches, prev_pos=prev_pos, anchor_fret=anchor_fret)
+            else:  # melodic
+                if len(pitches) == 1:
+                    pos = _select_tab_position(pitches[0], prev_pos=prev_pos, anchor_fret=None)
+                    positions = [pos] if pos is not None else None
+                else:
+                    positions = _assign_chord_positions(pitches, prev_pos=prev_pos, anchor_fret=None)
+
+            if positions is None or len(positions) != len(pitches):
+                measure_positions.append([])
+            else:
+                measure_positions.append(positions)
+                avg_string = sum(p[0] for p in positions) / float(len(positions))
+                avg_fret = sum(p[1] for p in positions) / float(len(positions))
+                prev_pos = (int(round(avg_string)), int(round(avg_fret)))
+
+            offset_q += dur_q
+
+        tab_positions.append(measure_positions)
+
+    return tab_positions
+
+
 def _parse_chord_label(label: str) -> tuple[str | None, str | None]:
     if not label or label == "N":
         return None, None
+    label = label.split("/", 1)[0].strip()
     if ":" in label:
         root, qual = label.split(":", 1)
         root = root.strip()
         qual = qual.strip().lower() or "maj"
     else:
-        root, qual = label.strip(), "maj"
+        match = re.match(r"^([A-Ga-g])([#b]?)(.*)$", label)
+        if match:
+            root = f"{match.group(1).upper()}{match.group(2)}"
+            qual = (match.group(3) or "").strip().lower() or "maj"
+        else:
+            root, qual = label.strip(), "maj"
     if not root:
         return None, None
+    qual = qual.replace("(", "").replace(")", "").replace(" ", "")
+    if qual in ("major", ""):
+        qual = "maj"
+    if qual in ("minor", "m"):
+        qual = "min"
+    if "min7b5" in qual or "m7b5" in qual or "hdim" in qual:
+        qual = "min"
+    if "dim" in qual:
+        qual = "min"
+    if "aug" in qual:
+        qual = "maj"
     return root, qual
 
 
 def _triad_label(root: str, qual: str) -> str:
-    if qual in ("min", "m", "min7", "m7"):
+    if qual in ("min", "m", "min7", "m7", "dim", "min7b5", "m7b5", "hdim"):
         return f"{root}:min"
     return f"{root}:maj"
 
@@ -830,6 +1290,249 @@ def _tempo_from_beat_times(beat_times: np.ndarray | None) -> float:
     return float(60.0 / float(np.median(diffs)))
 
 
+def _extract_audio_segment(
+    y: np.ndarray,
+    sr: int,
+    start_s: float,
+    end_s: float,
+) -> np.ndarray:
+    """Extract a segment of audio between start and end times."""
+    start_sample = int(start_s * sr)
+    end_sample = int(end_s * sr)
+    start_sample = max(0, min(start_sample, len(y)))
+    end_sample = max(start_sample, min(end_sample, len(y)))
+    return y[start_sample:end_sample]
+
+
+def _run_guitar_mode(
+    y: np.ndarray,
+    sr: int,
+    audio_path: Path,
+    chords: list[ChordSegment],
+    beat_times: np.ndarray | None,
+    tempo_bpm: float,
+    *,
+    base_note_events: list[NoteEvent] | None = None,
+    use_flats: bool = False,
+    onset_threshold: float = 0.5,
+    frame_threshold: float = 0.3,
+    min_note_ms: float = 127.70,
+    window_sec: float = 3.0,
+    hop_sec: float = 1.5,
+) -> tuple[list[NoteEvent], list[_StrumEvent], list[ContentSegment]]:
+    """
+    Run guitar mode: hybrid transcription that applies melodic or chordal
+    processing based on content analysis.
+
+    Args:
+        y: Audio signal (mono, normalized)
+        sr: Sample rate
+        audio_path: Path to audio file for Basic Pitch
+        chords: Detected chord segments
+        beat_times: Beat times array
+        tempo_bpm: Detected tempo
+        base_note_events: Precomputed Basic Pitch note events (original timeline)
+        use_flats: Whether to use flat notation
+        onset_threshold: Basic Pitch onset threshold
+        frame_threshold: Basic Pitch frame threshold
+        min_note_ms: Minimum note duration in ms
+        window_sec: Content analysis window size
+        hop_sec: Content analysis hop size
+
+    Returns:
+        Tuple of (note_events, strum_events, content_segments)
+    """
+    # Step 1: Analyze content to classify segments
+    content_segments = analyze_musical_content(
+        y, sr,
+        window_sec=window_sec,
+        hop_sec=hop_sec,
+        min_segment_sec=1.0,
+    )
+
+    all_note_events: list[NoteEvent] = []
+    all_strum_events: list[_StrumEvent] = []
+
+    if base_note_events is None:
+        try:
+            _, base_note_events = transcribe_basic_pitch(
+                audio_path,
+                onset_threshold=onset_threshold,
+                frame_threshold=frame_threshold,
+                minimum_note_length_ms=min_note_ms,
+                melodia_trick=True,
+            )
+        except Exception as e:
+            print(f"Error executing basic_pitch for guitar mode: {e}")
+            base_note_events = []
+
+    # Assign chord shapes for strum events
+    segment_shapes = _assign_shapes(chords)
+
+    for seg in content_segments:
+        start_s = seg.start_time_s
+        end_s = seg.end_time_s
+
+        if seg.content_type in ("melodic", "hybrid"):
+            seg_notes = [
+                n
+                for n in (base_note_events or [])
+                if n.start_time_s >= start_s and n.start_time_s < end_s
+            ]
+            all_note_events.extend(seg_notes)
+
+        if seg.content_type in ("chordal", "hybrid"):
+            # For chordal segments: detect strum onsets
+            try:
+                y_seg = _extract_audio_segment(y, sr, start_s, end_s)
+                if len(y_seg) > sr * 0.2:  # At least 200ms of audio
+                    beat_times_seg = None
+                    if beat_times is not None and len(beat_times) > 1:
+                        bt = np.asarray(beat_times, dtype=np.float32)
+                        mask = (bt >= float(start_s)) & (bt < float(end_s))
+                        if np.count_nonzero(mask) >= 2:
+                            beat_times_seg = (bt[mask] - float(start_s)).astype(np.float32)
+                    min_interval = 0.12 if seg.content_type == "chordal" else 0.2
+                    onset_delta = 0.2 if seg.content_type == "chordal" else 0.25
+                    strum_onsets = detect_strum_onsets(
+                        y_seg,
+                        sr,
+                        beat_times=beat_times_seg,
+                        tempo_bpm=tempo_bpm,
+                        min_interval_s=min_interval,
+                        onset_delta=onset_delta,
+                        backtrack=False,
+                    )
+                    # Offset onsets back to global time
+                    strum_onsets = strum_onsets + start_s
+
+                    # Build strum events with chord shapes
+                    strum_evts = _build_strum_events(
+                        strum_onsets, segment_shapes, use_flats=use_flats
+                    )
+                    all_strum_events.extend(strum_evts)
+            except Exception as e:
+                print(f"Error in chordal detection for segment {start_s:.2f}-{end_s:.2f}: {e}")
+
+    return all_note_events, all_strum_events, content_segments
+
+
+def _merge_note_events_for_guitar(
+    note_events: list[NoteEvent],
+    strum_events: list[_StrumEvent],
+    content_segments: list[ContentSegment],
+    *,
+    tempo_bpm: float,
+) -> list[NoteEvent]:
+    """
+    Merge note events and strum events into a unified list of NoteEvents.
+
+    For segments classified as chordal, converts strum events to note events.
+    For melodic segments, keeps note events as-is.
+    For hybrid segments, combines both with deduplication.
+
+    Args:
+        note_events: Note events from melodic transcription
+        strum_events: Strum events from chordal detection
+        content_segments: Content classification segments
+        tempo_bpm: Tempo in BPM
+
+    Returns:
+        Merged list of NoteEvent objects
+    """
+    # Convert strum events to note events
+    strum_notes = _strum_events_to_note_events(strum_events, tempo_bpm=tempo_bpm)
+
+    # Build a lookup for segment types by time
+    def get_content_type(t: float) -> str:
+        for seg in content_segments:
+            if seg.start_time_s <= t < seg.end_time_s:
+                return seg.content_type
+        return "hybrid"
+
+    merged: list[NoteEvent] = []
+
+    # Add melodic notes from melodic/hybrid segments
+    for note in note_events:
+        ctype = get_content_type(note.start_time_s)
+        if ctype in ("melodic", "hybrid"):
+            merged.append(note)
+
+    # Add strum notes from chordal segments
+    for note in strum_notes:
+        ctype = get_content_type(note.start_time_s)
+        if ctype == "chordal":
+            merged.append(note)
+        elif ctype == "hybrid":
+            # For hybrid, add strum notes that don't overlap with existing notes
+            overlaps = False
+            for existing in merged:
+                if (abs(existing.start_time_s - note.start_time_s) < 0.05 and
+                    existing.pitch_midi == note.pitch_midi):
+                    overlaps = True
+                    break
+            if not overlaps:
+                merged.append(note)
+
+    # Sort by start time
+    merged.sort(key=lambda n: n.start_time_s)
+
+    return merged
+
+
+def merge_transcription_results(
+    note_events: list[NoteEvent],
+    strum_events: list[_StrumEvent],
+    content_segments: list[ContentSegment],
+    chords: list[ChordSegment],
+    *,
+    tempo_bpm: float,
+    beat_times: np.ndarray | None,
+    time_signature: str,
+) -> GuitarTranscriptionResult:
+    """
+    Merge melodic and chordal transcription outputs and return a unified score.
+
+    This removes duplicates between melodic notes and chord tones, keeps chord
+    metadata, and produces a ScoreData ready for export.
+    """
+    merged = _merge_note_events_for_guitar(
+        note_events,
+        strum_events,
+        content_segments,
+        tempo_bpm=tempo_bpm,
+    )
+    merged = _post_process_note_events(merged, chords=chords, tempo_bpm=float(tempo_bpm))
+
+    quant_res = quantize_note_events_to_score(
+        merged,
+        tempo_bpm=float(tempo_bpm),
+        beat_times=beat_times,
+        time_signature=time_signature,
+    )
+
+    tab_positions = quant_res.tab_positions
+    if tab_positions is None:
+        tab_positions = _build_tab_positions_for_guitar(
+            quant_res.score,
+            content_segments=content_segments,
+            chords=chords,
+            beat_times=beat_times,
+            tempo_bpm=float(tempo_bpm),
+            pickup_quarters=float(quant_res.pickup_quarters),
+        )
+
+    return GuitarTranscriptionResult(
+        segments=content_segments,
+        note_events=merged,
+        chord_events=chords,
+        score_data=quant_res.score,
+        pickup_quarters=float(quant_res.pickup_quarters),
+        score_m21=quant_res.score_m21,
+        tab_positions=tab_positions,
+    )
+
+
 def _score_complexity_cost(score: ScoreData) -> float:
     """
     Heuristic to choose a beat grid that yields more readable notation.
@@ -913,6 +1616,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
 
     transcription_mode = _normalize_transcription_mode(settings.TRANSCRIPTION_MODE)
     is_accompaniment = transcription_mode == "accompaniment"
+    is_guitar_mode = transcription_mode == "guitar"
 
     wav_path = work / "audio_mono_44k.wav"
     ffmpeg_to_wav_mono_44k(input_path, wav_path)
@@ -925,7 +1629,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     transcription_source = "mix"
     beat_source = "mix"
 
-    if bool(settings.ENABLE_DEMUCS):
+    if bool(settings.ENABLE_DEMUCS) and _DEMUCS_AVAILABLE and run_demucs_4stems is not None:
         try:
             stems_dir = run_demucs_4stems(
                 mix_path,
@@ -933,8 +1637,15 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
                 model=str(settings.DEMUCS_MODEL),
                 return_stem=False,
             )
-            transcription_path = select_stem_path(stems_dir, ("other", "vocals"))
+            # Parse stem priority from config (comma-separated) or use default
+            stem_priority_str = getattr(settings, "TRANSCRIPTION_STEM_PRIORITY", "guitar,other,vocals")
+            stem_priority = tuple(s.strip() for s in stem_priority_str.split(",") if s.strip())
+            if not stem_priority:
+                stem_priority = ("guitar", "other", "vocals")
+
+            transcription_path = select_stem_path(stems_dir, stem_priority)
             transcription_source = transcription_path.stem
+            # Use drums stem for beat tracking if available
             drums_path = get_stem_path(stems_dir, "drums")
             if drums_path is not None:
                 beat_path = drums_path
@@ -946,6 +1657,8 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             beat_path = mix_path
             transcription_source = "mix"
             beat_source = "mix"
+    elif bool(settings.ENABLE_DEMUCS) and not _DEMUCS_AVAILABLE:
+        demucs_error = "Demucs not available (torch/demucs not installed)"
 
     y_trans, sr_trans = load_wav(transcription_path)
     y_trans = peak_normalize(y_trans)
@@ -973,6 +1686,44 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     )
     tempo_for_bp = float(tempo_raw) if tempo_raw and tempo_raw > 0 else 120.0
 
+    onset_threshold = float(settings.BASIC_PITCH_ONSET_THRESHOLD)
+    frame_threshold = float(settings.BASIC_PITCH_FRAME_THRESHOLD)
+    characteristics: dict[str, float] | None = None
+    if bool(getattr(settings, "ENABLE_AUTO_THRESHOLD_CALIBRATION", False)):
+        try:
+            characteristics = analyze_audio_characteristics(harmonic_path, cache_dir=work)
+            onset_threshold, frame_threshold = calibrate_thresholds(characteristics)
+            _LOG.info(
+                "Auto-calibrated thresholds: onset=%.3f, frame=%.3f",
+                float(onset_threshold),
+                float(frame_threshold),
+            )
+        except Exception as exc:
+            _LOG.warning("Threshold calibration failed, using defaults: %s", exc)
+            characteristics = None
+            onset_threshold = float(settings.BASIC_PITCH_ONSET_THRESHOLD)
+            frame_threshold = float(settings.BASIC_PITCH_FRAME_THRESHOLD)
+
+    if characteristics is not None:
+        try:
+            calibration_info = {
+                "characteristics": characteristics,
+                "thresholds": {
+                    "onset": float(onset_threshold),
+                    "frame": float(frame_threshold),
+                },
+                "defaults": {
+                    "onset": float(settings.BASIC_PITCH_ONSET_THRESHOLD),
+                    "frame": float(settings.BASIC_PITCH_FRAME_THRESHOLD),
+                },
+            }
+            (work / "threshold_calibration.json").write_text(
+                json.dumps(calibration_info, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            _LOG.warning("Failed to write threshold calibration info: %s", exc)
+
     # --- 1. Basic Pitch Transcription ---
     note_events: list[NoteEvent] = []
     midi_data = None
@@ -981,8 +1732,8 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             midi_data, note_events = transcribe_basic_pitch(
                 harmonic_path,
                 midi_tempo=float(tempo_for_bp),
-                onset_threshold=float(settings.BASIC_PITCH_ONSET_THRESHOLD),
-                frame_threshold=float(settings.BASIC_PITCH_FRAME_THRESHOLD),
+                onset_threshold=float(onset_threshold),
+                frame_threshold=float(frame_threshold),
                 minimum_note_length_ms=float(settings.BASIC_PITCH_MIN_NOTE_MS),
                 melodia_trick=True,
             )
@@ -990,6 +1741,8 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             print(f"Error executing basic_pitch: {e}")
             note_events = []
             midi_data = None
+
+    note_events_raw = list(note_events)
 
     # Decide whether to keep beats as-is (double-time) or halved (half-time) based on
     # readability of the quantized score. This keeps `tempo_bpm`, `beat_times`, and
@@ -1060,40 +1813,65 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             min_duration=float(_SEVENTH_MIN_DURATION),
             seventh_ratio=float(_SEVENTH_RATIO),
         )
+    spelled_chords_raw = list(spelled_chords)
     spelled_chords = _shift_chords(spelled_chords, beat_offset)
 
-    if note_events:
-        note_events = _merge_overlapping_notes(note_events, gap_s=0.03)
+    # --- Guitar Mode: Hybrid transcription based on content analysis ---
+    content_segments: list[ContentSegment] = []
+    content_segments_raw: list[ContentSegment] = []
+    strum_events_guitar: list[_StrumEvent] = []
+    guitar_result: GuitarTranscriptionResult | None = None
+    if is_guitar_mode:
+        try:
+            guitar_notes, strum_events_guitar, content_segments = _run_guitar_mode(
+                y_trans,
+                sr_trans,
+                harmonic_path,
+                spelled_chords_raw,
+                beat_times_sel,
+                tempo_bpm,
+                base_note_events=note_events_raw,
+                use_flats=use_flats,
+                onset_threshold=float(onset_threshold),
+                frame_threshold=float(frame_threshold),
+                min_note_ms=float(settings.BASIC_PITCH_MIN_NOTE_MS),
+                window_sec=float(settings.CONTENT_ANALYSIS_WINDOW_SEC),
+                hop_sec=float(settings.CONTENT_ANALYSIS_HOP_SEC),
+            )
+            # Shift events to account for beat offset
+            guitar_notes = _shift_note_events(guitar_notes, beat_offset)
+            strum_events_guitar = [
+                _StrumEvent(
+                    time_s=e.time_s - beat_offset,
+                    keys=e.keys,
+                    positions=e.positions,
+                    pitches=e.pitches,
+                )
+                for e in strum_events_guitar
+            ]
+            content_segments_raw = list(content_segments)
+            content_segments = _shift_content_segments(content_segments, beat_offset)
+            # Merge melodic and chordal results (includes quantization)
+            guitar_result = merge_transcription_results(
+                guitar_notes,
+                strum_events_guitar,
+                content_segments,
+                spelled_chords,
+                tempo_bpm=tempo_bpm,
+                beat_times=beat_times_norm,
+                time_signature=time_sig,
+            )
+            note_events = guitar_result.note_events
+        except Exception as e:
+            print(f"Error in guitar mode: {e}")
+            # Fall back to standard note transcription
+            is_guitar_mode = False
 
-        amps = np.asarray([float(ev.amplitude) for ev in note_events], dtype=np.float32)
-        if amps.size > 0:
-            min_amp = max(0.2, float(np.percentile(amps, 35)))
-        else:
-            min_amp = 0.2
-
-        sec_per_q = 60.0 / float(tempo_bpm if tempo_bpm else 120.0)
-        min_dur_s = max(0.08, 0.2 * sec_per_q)
-
-        chord_conf_threshold = None
-        if spelled_chords:
-            confs = np.asarray([float(c.confidence) for c in spelled_chords], dtype=np.float32)
-            if confs.size > 0:
-                chord_conf_threshold = max(float(_CHORD_CONFIDENCE_THRESHOLD), float(np.median(confs)) * 0.9)
-
-        note_events = _filter_note_events(
+    if note_events and not is_accompaniment and guitar_result is None:
+        note_events = _post_process_note_events(
             note_events,
             chords=spelled_chords,
-            min_amp=min_amp,
-            min_dur_s=min_dur_s,
-            min_pitch=40,
-            max_pitch=88,
-            chord_tone_bias=float(_CHORD_TONE_BIAS),
-            chord_confidence_threshold=chord_conf_threshold,
-        )
-        note_events = _limit_onset_polyphony(
-            note_events,
-            max_notes=6,
-            onset_window_s=0.06,
+            tempo_bpm=float(tempo_bpm),
         )
 
     strum_onsets = np.asarray([], dtype=np.float32)
@@ -1129,6 +1907,12 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             min_grid_q=float(_ACC_MIN_GRID_Q),
         )
         note_events_debug = _strum_events_to_note_events(strum_events, tempo_bpm=float(tempo_bpm))
+    elif guitar_result is not None:
+        score_data = guitar_result.score_data
+        pickup_quarters = float(guitar_result.pickup_quarters)
+        score_m21 = guitar_result.score_m21
+        tab_positions = guitar_result.tab_positions
+        note_events_debug = guitar_result.note_events
     else:
         # --- 3. Quantization to ScoreData ---
         quant_res = quantize_note_events_to_score(
@@ -1140,6 +1924,7 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
         score_data = quant_res.score
         pickup_quarters = float(quant_res.pickup_quarters)
         score_m21 = quant_res.score_m21
+        tab_positions = quant_res.tab_positions
 
     # --- Debug artifacts ---
     try:
@@ -1165,6 +1950,23 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             json.dumps(chords_payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        segments_to_dump = content_segments_raw or content_segments
+        if segments_to_dump:
+            segments_payload = []
+            for seg in segments_to_dump:
+                segments_payload.append(
+                    {
+                        "start_time_s": float(seg.start_time_s),
+                        "end_time_s": float(seg.end_time_s),
+                        "content_type": str(seg.content_type),
+                        "confidence": float(seg.confidence),
+                        "metrics": dict(seg.metrics or {}),
+                    }
+                )
+            (out / "content_segments.json").write_text(
+                json.dumps(segments_payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         if is_accompaniment:
             (out / "strum_onsets.json").write_text(
                 json.dumps({"onsets_s": strum_onsets.tolist()}, ensure_ascii=False, indent=2),
@@ -1192,9 +1994,10 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
     musicxml_path = out / "result.musicxml"
 
     # --- 4. Export MusicXML (Full Lead Sheet with Tab) ---
+    score_payload = score_m21 if (score_m21 is not None and tab_positions is None) else score_data
     export_musicxml(
         musicxml_path,
-        score_m21 if score_m21 is not None else score_data,
+        score_payload,
         tempo_bpm=float(tempo_bpm),
         time_signature=time_sig,
         key_signature_fifths=(key_sig.fifths if key_sig else None),
@@ -1227,6 +2030,8 @@ def run_pipeline(job_dir: Path, input_path: Path) -> JobResult:
             pdf_error = f"No se pudo generar PDF (LilyPond): {e}"
 
     backend_name = "basic_pitch+chords_viterbi"
+    if guitar_result is not None:
+        backend_name = "guitar_hybrid+chords_viterbi"
     if is_accompaniment:
         backend_name = "accompaniment+chords_viterbi"
 
